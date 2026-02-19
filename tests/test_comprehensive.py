@@ -126,7 +126,7 @@ This is the appendix.
         assert "Proofs" in appendix
     
     def test_with_input(self, temp_dir):
-        """Test expanding \input commands."""
+        r"""Test expanding \input commands."""
         # Create main file
         main_content = r"""
 \documentclass{article}
@@ -161,7 +161,7 @@ This is section 1.
         assert "Circular include skipped" in parser.content
     
     def test_missing_input(self, temp_dir):
-        """Test handling of missing \input files."""
+        r"""Test handling of missing \input files."""
         tex_content = r"""
 \documentclass{article}
 \begin{document}
@@ -494,6 +494,34 @@ The equation is $x = y$.
         assert r"\maketitle" not in processed
         assert r"\documentclass" not in processed
         assert r"\usepackage" not in processed
+    
+    def test_preprocess_multiline_commands(self):
+        """Test removing multi-line LaTeX commands."""
+        from arxiv_to_md.converter import _remove_nested_command
+        
+        # Test simple nested command
+        content = r"\address{Line 1\Line 2}Some text"
+        processed = _remove_nested_command(content, 'address')
+        assert "Line 1" not in processed
+        assert "Line 2" not in processed
+        assert "Some text" in processed
+        
+        # Test nested braces
+        content = r"\address{University of {Somewhere}}More text"
+        processed = _remove_nested_command(content, 'address')
+        assert "University" not in processed
+        assert "Somewhere" not in processed
+        assert "More text" in processed
+    
+    def test_preprocess_preamble_commands(self):
+        """Test removing preamble commands."""
+        converter = LaTeXConverter()
+        content = r"\newtheorem{theorem}{Theorem} \definecolor{red}{rgb}{1,0,0} Some text"
+        processed = converter._preprocess_commands(content)
+        
+        assert r"\newtheorem" not in processed
+        assert r"\definecolor" not in processed
+        assert "Some text" in processed
 
 
 # ============================================================================
@@ -512,29 +540,29 @@ class TestMarkdownPostProcessor:
         assert "\n\n\n" not in processed
     
     def test_simplify_math_boldsymbol(self):
-        """Test simplifying \boldsymbol."""
+        r"""Test simplifying \boldsymbol."""
         processor = MarkdownPostProcessor()
         content = r"$\boldsymbol{x}$"
         processed = processor._simplify_math(content)
-        
+
         assert r"\boldsymbol" not in processed
         assert r"\mathbf" in processed
-    
+
     def test_simplify_math_operatorname(self):
-        """Test simplifying \operatorname."""
+        r"""Test simplifying \operatorname."""
         processor = MarkdownPostProcessor()
         content = r"$\operatorname{softmax}$"
         processed = processor._simplify_math(content)
-        
+
         assert r"\operatorname" not in processed
         assert "softmax" in processed
-    
+
     def test_simplify_left_right(self):
-        """Test simplifying \left and \right."""
+        r"""Test simplifying \left and \right."""
         processor = MarkdownPostProcessor()
         content = r"$\left( x \right)$"
         processed = processor._simplify_math(content)
-        
+
         assert r"\left" not in processed
         assert r"\right" not in processed
         assert "( x )" in processed
@@ -552,11 +580,28 @@ class TestMarkdownPostProcessor:
         processor = MarkdownPostProcessor()
         content = "# Main\nContent\n# Appendix\nAppendix content"
         main, appendix = processor.split_appendix(content)
-        
+
         assert "Main" in main
         assert "Content" in main
         assert "Appendix" in appendix
         assert "Appendix content" in appendix
+
+    def test_cleanup_latex_artifacts(self):
+        """Test cleaning up LaTeX artifacts at start of document."""
+        processor = MarkdownPostProcessor()
+
+        # Test removing theorem artifacts
+        content = "Theorem\n\nProposition\n\n# Introduction\nSome content"
+        processed = processor._cleanup_content(content)
+        assert "# Introduction" in processed
+        assert "Some content" in processed
+
+        # Test removing bracketed theorem references
+        content = "\\[theorem\\]\n\n# Main\nContent"
+        processed = processor._cleanup_content(content)
+        assert "# Main" in processed
+        assert "Content" in processed
+        assert "theorem" not in processed or "#" in processed
 
 
 # ============================================================================

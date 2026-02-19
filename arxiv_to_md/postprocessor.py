@@ -77,6 +77,49 @@ class MarkdownPostProcessor:
         # Remove trailing whitespace
         content = re.sub(r'[ \t]+$', '', content, flags=re.MULTILINE)
         
+        # Remove raw_tex attributes from pandoc
+        content = re.sub(r'`[^`]*`\{=latex\}', '', content)
+        
+        # Remove empty lines at the start of the document that might contain LaTeX artifacts
+        lines = content.split('\n')
+        start_idx = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            # Skip empty lines and lines that start with LaTeX commands or look like residual content
+            if (stripped == '' or 
+                stripped.startswith('\\') or 
+                stripped.startswith('rgb') or
+                stripped.startswith('Theorem') and i < 10 or
+                stripped.startswith('Proposition') and i < 10 or
+                stripped.startswith('Lemma') and i < 10 or
+                stripped.startswith('Definition') and i < 10 or
+                stripped.startswith('Corollary') and i < 10):
+                start_idx = i + 1
+            else:
+                break
+        
+        content = '\n'.join(lines[start_idx:])
+        
+        # Remove lines that are just bracketed theorem names at the start
+        lines = content.split('\n')
+        cleaned_lines = []
+        found_content = False
+        for line in lines:
+            stripped = line.strip()
+            # Skip lines that look like theorem environment artifacts
+            if not found_content:
+                if stripped in ['', 'Theorem', 'Proposition', 'Lemma', 'Corollary', 'Definition', 'Example', 
+                              'Remark', 'Claim', 'Conjecture', 'Assertion', 'Exercise', 'Assumption', 'Question']:
+                    continue
+                # Skip bracketed theorem references like "[theorem]" or "\[theorem\]"
+                if re.match(r'^[\[\]\\]+(?:theorem|proposition|lemma|corollary|definition)[\[\]\\]*$', stripped, re.IGNORECASE):
+                    continue
+            if stripped:
+                found_content = True
+            cleaned_lines.append(line)
+        
+        content = '\n'.join(cleaned_lines)
+        
         return content
     
     def _simplify_math(self, content: str) -> str:

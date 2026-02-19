@@ -15,6 +15,49 @@ class LaTeXConversionError(Exception):
     pass
 
 
+def _remove_nested_command(content: str, cmd: str) -> str:
+    """Remove LaTeX command with potentially nested braces.
+    
+    Handles commands that may span multiple lines and have nested braces.
+    
+    Args:
+        content: LaTeX content
+        cmd: Command name without backslash (e.g., 'address', 'thanks')
+        
+    Returns:
+        Content with command removed
+    """
+    pattern = rf'\\{cmd}\{{'
+    result = []
+    i = 0
+    
+    while i < len(content):
+        match = re.search(pattern, content[i:])
+        if not match:
+            result.append(content[i:])
+            break
+            
+        # Append content before command
+        result.append(content[i:i + match.start()])
+        
+        # Find matching closing brace
+        start = i + match.end()
+        brace_count = 1
+        j = start
+        
+        while j < len(content) and brace_count > 0:
+            if content[j] == '{':
+                brace_count += 1
+            elif content[j] == '}':
+                brace_count -= 1
+            j += 1
+        
+        # Move past the command
+        i = j
+    
+    return ''.join(result)
+
+
 class LaTeXConverter:
     """Convert LaTeX to Markdown using Pandoc."""
     
@@ -88,47 +131,75 @@ class LaTeXConverter:
     
     def _preprocess_commands(self, content: str) -> str:
         """Remove LaTeX commands that don't convert well to markdown.
-        
+
         Only removes commands outside of math environments.
         """
-        # Remove \maketitle
+        # Document structure commands
         content = re.sub(r'\\maketitle\b', '', content)
-        
-        # Remove \documentclass, \usepackage, etc. (preamble commands)
         content = re.sub(r'\\documentclass(?:\[[^\]]*\])?\{[^}]*\}', '', content)
+        content = re.sub(r'\\tableofcontents\b', '', content)
+
+        # Package and preamble commands (simple, single-line)
         content = re.sub(r'\\usepackage(?:\[[^\]]*\])?\{[^}]*\}', '', content)
-        
-        # Note: Don't remove \author as it may span multiple lines with nested braces
-        # Pandoc can handle it fine. Only remove simple commands.
         content = re.sub(r'\\title\{[^}]*\}', '', content)
         content = re.sub(r'\\date\{[^}]*\}', '', content)
-        
-        # Remove author information commands
-        content = re.sub(r'\\email\{[^}]*\}', '', content)
-        content = re.sub(r'\\affiliation\{[^}]*\}', '', content)
-        content = re.sub(r'\\institute\{[^}]*\}', '', content)
-        content = re.sub(r'\\address\{[^}]*\}', '', content)
-        
-        # Remove problematic environments that Pandoc can't handle
-        # bibunit environment
+
+        # Author information commands (handle multi-line with nested braces)
+        author_cmds = ['email', 'affiliation', 'institute', 'address', 'thanks']
+        for cmd in author_cmds:
+            content = _remove_nested_command(content, cmd)
+
+        # Metadata and classification commands
+        meta_cmds_simple = [
+            (r'\\makeatletter\b', ''),
+            (r'\\makeatother\b', ''),
+            (r'\\numberwithin\{[^}]+\}\{[^}]+\}', ''),
+            (r'\\hyphenation\{[^}]+\}', ''),
+            (r'\\subjclass(?:\[[^\]]*\])?\{[^}]*\}', ''),
+            (r'\\setcounter\{[^}]+\}\{[^}]+\}', ''),
+        ]
+        for pattern, repl in meta_cmds_simple:
+            content = re.sub(pattern, repl, content)
+
+        # Theorem and environment definitions
+        content = re.sub(r'\\newtheorem\{[^}]+\}(?:\[[^\]]*\])?(?:\{[^}]*\})?(?:\[[^\]]*\])?', '', content)
+        content = re.sub(r'\\theoremstyle\{[^}]+\}', '', content)
+
+        # Problematic environments
         content = re.sub(r'\\begin\{bibunit\}', '', content)
         content = re.sub(r'\\end\{bibunit\}', '', content)
-        
-        # Remove \parhead and similar custom commands that might be redefined
-        content = re.sub(r'\\parhead\b', '', content)
-        
-        # Remove \DeclarePairedDelimiter and similar command definitions
-        # These use #1, #2 etc as parameter placeholders which Pandoc can't handle
-        # Handle multi-line definitions
-        content = re.sub(r'\\DeclarePairedDelimiter\{[^}]+\}\{[^}]+\}\{[^}]+\}', '', content, flags=re.DOTALL)
-        content = re.sub(r'\\DeclarePairedDelimiterX[^\n]*\n[^}]+\}', '', content, flags=re.DOTALL)
-        content = re.sub(r'\\DeclareRobustCommand\{[^}]+\}\[[^\]]*\]\{[^}]+\}', '', content, flags=re.DOTALL)
-        
-        # Remove citation name formatting commands that appear in text
-        content = re.sub(r'\\citenamefont\{([^}]+)\}', r'\1', content)
-        content = re.sub(r'\\bibfnamefont\{([^}]+)\}', r'\1', content)
-        content = re.sub(r'\\bibnamefont\{([^}]+)\}', r'\1', content)
-        
+
+        # Custom command definitions that confuse Pandoc
+        cmd_defs = [
+            r'\\DeclarePairedDelimiter\{[^}]+\}\{[^}]+\}\{[^}]+\}',
+            r'\\DeclarePairedDelimiterX[^\n]*\n[^}]+\}',
+            r'\\DeclareRobustCommand\{[^}]+\}\[[^\]]*\]\{[^}]+\}',
+            r'\\parhead\b',
+        ]
+        for pattern in cmd_defs:
+            content = re.sub(pattern, '', content, flags=re.DOTALL)
+
+        # Citation formatting commands (extract content only)
+        cite_formats = [
+            (r'\\citenamefont\{([^}]+)\}', r'\1'),
+            (r'\\bibfnamefont\{([^}]+)\}', r'\1'),
+            (r'\\bibnamefont\{([^}]+)\}', r'\1'),
+        ]
+        for pattern, repl in cite_formats:
+            content = re.sub(pattern, repl, content)
+
+        # Graphics and color commands (nested braces)
+        graphics_cmds = [
+            'usetikzlibrary', 'tikzset', 'pgfplotsset',
+            'definecolor', 'color', 'colorlet',
+            'keyword', 'keywords', 'pacs'
+        ]
+        for cmd in graphics_cmds:
+            content = _remove_nested_command(content, cmd)
+
+        # Remove raw_tex attributes from pandoc output
+        content = re.sub(r'`[^`]*`\{=latex\}', '', content)
+
         return content
     
     def _postprocess_citations(self, content: str) -> str:
