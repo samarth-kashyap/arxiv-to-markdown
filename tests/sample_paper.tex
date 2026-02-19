@@ -1,0 +1,29 @@
+\documentclass{article}
+\usepackage{amsmath}
+\title{Test Paper}
+\author{John Doe}
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+This is a test paper \cite{smith2020attention}. We build on previous work by \cite{vaswani2017transformer}.
+
+\subsection{Background}
+
+The key equation is:
+\begin{equation}
+\label{eq:attention}
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
+\end{equation}
+
+As shown in Equation \ref{eq:attention}, this is important.
+
+\section{Methods}
+
+We use bold vectors like $\boldsymbol{x}$ and $\mathbf{w}$.
+
+\bibliography{refs}
+
+\end{document}
