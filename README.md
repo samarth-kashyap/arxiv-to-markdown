@@ -14,10 +14,10 @@ Convert arXiv papers to clean, LLM-readable Markdown format.
 - **Author-Year Citations** - Converts numbered citations to `[Author et al., Year](link)` format with clickable arXiv/DOI links
 - **LaTeX Math Preservation** - Keeps `$...$` and `$$...$$` math notation for LLM compatibility
 - **Separate Appendix Files** - Automatically splits main paper and appendix into separate files
-- **Token-Efficient Output** - Simplifies notation (`oldsymbol` → `	extbf`, reduces whitespace)
+- **Token-Efficient Output** - Simplifies notation (`boldsymbol` → `textbf`, reduces whitespace)
 - **Bibliography Generation** - Creates formatted reference list with links
 - **Figure Placeholders** - Marks figure locations with captions for LLM context
-- **Reference Resolution** - Converts `ef`, `ef` to readable text
+- **Reference Resolution** - Converts `ref`, `ref` to readable text
 
 ---
 
