@@ -1,15 +1,298 @@
 """Module for post-processing markdown output."""
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Pattern
+
+
+@dataclass
+class CleanupPattern:
+    """Definition of a cleanup pattern for markdown content.
+    
+    Attributes:
+        name: Pattern name for identification
+        pattern: Regex pattern string or compiled pattern
+        replacement: Replacement string or function
+        handler: Optional custom handler function
+        flags: Regex flags
+    """
+    name: str
+    pattern: str
+    replacement: str = ''
+    handler: Optional[Callable[[str, 'CleanupPattern'], str]] = None
+    flags: int = 0
+    _compiled: Optional[Pattern] = None
+    
+    def compile(self) -> Pattern:
+        """Compile the regex pattern."""
+        self._compiled = re.compile(self.pattern, self.flags)
+        return self._compiled
+
+
+class MarkdownCleaner:
+    """Systematic markdown content cleaner.
+    
+    Provides organized, extensible patterns for cleaning up
+    markdown output from Pandoc conversion.
+    """
+    
+    # Patterns organized by category
+    CONTENT_PATTERNS: List[CleanupPattern] = [
+        # Remove LaTeX comments (outside math)
+        CleanupPattern('latex_comments', r'(?<!\\)%.*?$', '', flags=re.MULTILINE),
+        
+        # Collapse multiple blank lines
+        CleanupPattern('multiple_blank_lines', r'\n{3,}', '\n\n'),
+        
+        # Remove trailing whitespace
+        CleanupPattern('trailing_whitespace', r'[ \t]+$', '', flags=re.MULTILINE),
+        
+        # Remove raw_tex attributes from pandoc
+        CleanupPattern('raw_tex_attrs', r'`[^`]*`\{=latex\}', ''),
+        
+        # Remove RGB color definitions
+        CleanupPattern('rgb_colors', r'\bRGB\d+,\d+,\d+\b', ''),
+        
+        # Remove LaTeX artifacts at start
+        CleanupPattern('newsavebox', r'\\newsavebox\{[^}]+\}', ''),
+        CleanupPattern('sbox', r'\\sbox\{[^}]+\}\{[^}]+\}', ''),
+        
+        # Remove frontmatter commands
+        CleanupPattern('journal', r'\\journal\{[^}]+\}', ''),
+        CleanupPattern('frontmatter_env', r'\\(?:begin|end)\{frontmatter\}', ''),
+        CleanupPattern('abstract_env', r'\\(?:begin|end)\{abstract\}', ''),
+        CleanupPattern('keyword_env', r'\\(?:begin|end)\{keyword\}', ''),
+        CleanupPattern('keywords_env', r'\\(?:begin|end)\{keywords\}', ''),
+        CleanupPattern('appendix_cmd', r'\\appendix', ''),
+        
+        # Remove counter commands
+        CleanupPattern('addtoreset_full', r'\\addtoreset\{[^}]+\}\{[^}]+\}', ''),
+        CleanupPattern('addtoreset_partial', r'\\addtoreset\w*', ''),
+        CleanupPattern('addtoreset_at', r'\\@addtoreset\{[^}]+\}\{[^}]+\}', ''),
+    ]
+    
+    THEOREM_ENVIRONMENTS = [
+        'theorem', 'proposition', 'lemma', 'corollary', 'definition',
+        'example', 'remark', 'proof', 'claim', 'conjecture', 'assertion',
+        'exercise', 'assumption', 'question', 'observation', 'property',
+    ]
+    
+    MATH_PATTERNS: List[CleanupPattern] = [
+        # Simplify bold symbols
+        CleanupPattern('boldsymbol', r'\\boldsymbol\{([^}]+)\}', r'\\mathbf{\1}'),
+        
+        # Remove operatorname wrapper
+        CleanupPattern('operatorname', r'\\operatorname\{([^}]+)\}', r'\1'),
+        
+        # Remove ensuremath wrapper
+        CleanupPattern('ensuremath', r'\\ensuremath\{([^}]+)\}', r'\1'),
+        
+        # Remove mbox wrapper
+        CleanupPattern('mbox', r'\\mbox\{([^}]+)\}', r'\1'),
+        
+        # Simplify bold font commands
+        CleanupPattern('bf_command', r'\\bf\s+([a-zA-Z])', r'\\mathbf{\1}'),
+        
+        # Simplify left/right delimiters
+        CleanupPattern('left_paren', r'\\left\(', '('),
+        CleanupPattern('right_paren', r'\\right\)', ')'),
+        CleanupPattern('left_bracket', r'\\left\[', '['),
+        CleanupPattern('right_bracket', r'\\right\]', ']'),
+        CleanupPattern('left_brace', r'\\left\{', '{'),
+        CleanupPattern('right_brace', r'\\right\}', '}'),
+        
+        # Remove align environment markers
+        CleanupPattern('align_begin', r'\\begin\{align\*?\}', ''),
+        CleanupPattern('align_end', r'\\end\{align\*?\}', ''),
+        CleanupPattern('equation_begin', r'\\begin\{equation\*?\}', ''),
+        CleanupPattern('equation_end', r'\\end\{equation\*?\}', ''),
+    ]
+    
+    FIGURE_PATTERNS: List[CleanupPattern] = [
+        # Convert markdown images to placeholders
+        CleanupPattern('markdown_image', r'!\[([^\]]*)\]\([^)]+\)', r'[Figure: \1]'),
+        
+        # Remove width/height attributes
+        CleanupPattern('width_attr', r'\{width=[^}]+\}', ''),
+        CleanupPattern('height_attr', r'\{height=[^}]+\}', ''),
+        
+        # Clean up empty placeholders
+        CleanupPattern('empty_figure', r'\[Figure:\s*\]', '[Figure]'),
+        
+        # Convert HTML figure tags
+        CleanupPattern(
+            'html_figure',
+            r'<figure[^>]*>.*?<figcaption>(.*?)</figcaption>.*?</figure>',
+            r'[Figure: \1]',
+            flags=re.DOTALL
+        ),
+    ]
+    
+    TABLE_PATTERNS: List[CleanupPattern] = [
+        # Remove table commands
+        CleanupPattern('centering', r'\\centering\b', ''),
+        CleanupPattern('multirow', r'\\multirow\{[^}]+\}\{[^}]+\}\{([^}]+)\}', r'\1'),
+        CleanupPattern('cline', r'\\cline\{[^}]+\}', ''),
+        CleanupPattern('tabular_begin', r'\\begin\{tabular\}[^\n]*', ''),
+        CleanupPattern('tabular_end', r'\\end\{tabular\}', ''),
+        CleanupPattern('hline', r'\\hline', ''),
+    ]
+    
+    def __init__(self):
+        self._compile_patterns()
+    
+    def _compile_patterns(self):
+        """Compile all regex patterns for efficiency."""
+        for pattern_list in [
+            self.CONTENT_PATTERNS,
+            self.MATH_PATTERNS,
+            self.FIGURE_PATTERNS,
+            self.TABLE_PATTERNS,
+        ]:
+            for pattern in pattern_list:
+                if not hasattr(pattern, '_compiled'):
+                    pattern._compiled = pattern.compile()
+    
+    def _apply_patterns(self, content: str, patterns: List[CleanupPattern]) -> str:
+        """Apply a list of patterns to content."""
+        for pattern_def in patterns:
+            if pattern_def.handler:
+                content = pattern_def.handler(content, pattern_def)
+            else:
+                # Ensure pattern is compiled
+                compiled = pattern_def._compiled if pattern_def._compiled is not None else pattern_def.compile()
+                content = compiled.sub(pattern_def.replacement, content)
+        return content
+    
+    def clean_content(self, content: str) -> str:
+        """Clean up general markdown content."""
+        # Split into lines for line-by-line processing
+        lines = content.split('\n')
+        cleaned_lines = []
+        in_math = False
+        
+        for line in lines:
+            # Track math environments
+            if '$$' in line:
+                count = line.count('$$')
+                if count % 2 == 1:
+                    in_math = not in_math
+            elif '$' in line and '$$' not in line:
+                count = len(re.findall(r'(?<!\\)\$', line))
+                if count % 2 == 1:
+                    in_math = not in_math
+            
+            if not in_math:
+                # Remove LaTeX comments (but not in math)
+                line = re.sub(r'(?<!\\)%.*?$', '', line)
+            
+            cleaned_lines.append(line)
+        
+        content = '\n'.join(cleaned_lines)
+        
+        # Apply content patterns
+        content = self._apply_patterns(content, self.CONTENT_PATTERNS)
+        
+        # Remove empty lines at start with LaTeX artifacts
+        content = self._remove_start_artifacts(content)
+        
+        # Remove theorem environment markers
+        content = self._remove_theorem_environments(content)
+        
+        return content
+    
+    def _remove_start_artifacts(self, content: str) -> str:
+        """Remove LaTeX artifacts at the start of document."""
+        lines = content.split('\n')
+        start_idx = 0
+        
+        artifact_patterns = [
+            '',  # Empty lines
+            '=',  # Pandoc header artifacts
+            'rgb',
+        ]
+        
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            
+            # Check if line is an artifact
+            is_artifact = False
+            
+            # Empty or special marker
+            if stripped in artifact_patterns or stripped.startswith('= '):
+                is_artifact = True
+            # Starts with backslash
+            elif stripped.startswith('\\'):
+                is_artifact = True
+            # Starts with theorem-like name (only in first 10 lines)
+            elif i < 10 and stripped in self.THEOREM_ENVIRONMENTS:
+                is_artifact = True
+            # Bracketed theorem reference
+            elif i < 10 and re.match(
+                r'^[\[\]\\]+(?:' + '|'.join(self.THEOREM_ENVIRONMENTS) + r')[\[\]\\]*$',
+                stripped, re.IGNORECASE
+            ):
+                is_artifact = True
+            
+            if is_artifact:
+                start_idx = i + 1
+            else:
+                break
+        
+        return '\n'.join(lines[start_idx:])
+    
+    def _remove_theorem_environments(self, content: str) -> str:
+        """Remove theorem environment begin/end markers."""
+        # Build pattern for all theorem environments
+        env_list = '|'.join(self.THEOREM_ENVIRONMENTS)
+        pattern = rf'\\(?:begin|end)\{{({env_list})\}}'
+        content = re.sub(pattern, '', content, flags=re.IGNORECASE)
+        return content
+    
+    def clean_math(self, content: str) -> str:
+        """Simplify mathematical notation."""
+        content = self._apply_patterns(content, self.MATH_PATTERNS)
+        
+        # Simplify simple fractions
+        def simplify_frac(match):
+            num = match.group(1).strip()
+            den = match.group(2).strip()
+            
+            # Only simplify simple cases
+            if len(num) <= 2 and len(den) <= 2 and '/' not in num and '/' not in den:
+                if num.isdigit() and den.isdigit():
+                    return f'{num}/{den}'
+                if num.isalpha() and den.isalpha() and len(num) == 1 and len(den) == 1:
+                    return f'{num}/{den}'
+            
+            return match.group(0)
+        
+        content = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', simplify_frac, content)
+        
+        return content
+    
+    def clean_figures(self, content: str) -> str:
+        """Clean up figure references."""
+        return self._apply_patterns(content, self.FIGURE_PATTERNS)
+    
+    def clean_tables(self, content: str) -> str:
+        """Clean up LaTeX table artifacts."""
+        return self._apply_patterns(content, self.TABLE_PATTERNS)
 
 
 class MarkdownPostProcessor:
     """Post-process markdown for token efficiency and cleanliness."""
     
+    # Appendix heading patterns
+    APPENDIX_PATTERNS = [
+        r'^#{1,6}\s*Appendix',
+        r'^#{1,6}\s*A\.\s+\w',  # "A. Title"
+        r'^#{1,6}\s*A\s+\w',    # "A Title"
+    ]
+    
     def __init__(self):
-        pass
+        self.cleaner = MarkdownCleaner()
     
     def process(
         self,
@@ -26,16 +309,16 @@ class MarkdownPostProcessor:
             Cleaned markdown
         """
         # Apply cleanup patterns (safely)
-        content = self._cleanup_content(content)
+        content = self.cleaner.clean_content(content)
         
         # Simplify math notation
-        content = self._simplify_math(content)
+        content = self.cleaner.clean_math(content)
         
         # Clean up figure references
-        content = self._clean_figures(content)
+        content = self.cleaner.clean_figures(content)
         
         # Clean up tables
-        content = self._clean_tables(content)
+        content = self.cleaner.clean_tables(content)
         
         # Add bibliography if provided
         if bibliography:
@@ -43,225 +326,17 @@ class MarkdownPostProcessor:
         
         return content.strip()
     
-    def _cleanup_content(self, content: str) -> str:
-        """Clean up markdown content.
-        
-        Removes LaTeX comments but preserves content in math environments.
-        """
-        lines = content.split('\n')
-        cleaned_lines = []
-        in_math = False
-        
-        for line in lines:
-            # Track math environments
-            if '$$' in line:
-                # Toggle math mode
-                count = line.count('$$')
-                if count % 2 == 1:
-                    in_math = not in_math
-            elif '$' in line and '$$' not in line:
-                # Check if it's a single $ (inline math)
-                # Count unescaped $ signs
-                count = len(re.findall(r'(?<!\\)\$', line))
-                if count % 2 == 1:
-                    in_math = not in_math
-            
-            if not in_math:
-                # Remove LaTeX comments (but not in math)
-                line = re.sub(r'(?<!\\)%.*?$', '', line)
-            
-            cleaned_lines.append(line)
-        
-        content = '\n'.join(cleaned_lines)
-        
-        # Collapse multiple blank lines
-        content = re.sub(r'\n{3,}', '\n\n', content)
-        
-        # Remove trailing whitespace
-        content = re.sub(r'[ \t]+$', '', content, flags=re.MULTILINE)
-        
-        # Remove raw_tex attributes from pandoc
-        content = re.sub(r'`[^`]*`\{=latex\}', '', content)
-        
-        # Remove RGB color definitions
-        content = re.sub(r'\bRGB\d+,\d+,\d+\b', '', content)
-        
-        # Remove empty lines at the start of the document that might contain LaTeX artifacts
-        lines = content.split('\n')
-        start_idx = 0
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            # Skip empty lines and lines that start with LaTeX commands or look like residual content
-            # Also skip lines that are just "=" (pandoc header artifact) or start with "= "
-            if (stripped == '' or 
-                stripped.startswith('\\') or 
-                stripped.startswith('rgb') or
-                stripped == '=' or
-                stripped.startswith('= ') or
-                stripped.startswith('Theorem') and i < 10 or
-                stripped.startswith('Proposition') and i < 10 or
-                stripped.startswith('Lemma') and i < 10 or
-                stripped.startswith('Definition') and i < 10 or
-                stripped.startswith('Corollary') and i < 10):
-                start_idx = i + 1
-            else:
-                break
-        
-        content = '\n'.join(lines[start_idx:])
-        
-        # Remove specific LaTeX frontmatter commands that may still appear
-        content = re.sub(r'\\newsavebox\{[^}]+\}', '', content)
-        content = re.sub(r'\\sbox\{[^}]+\}\{[^}]+\}', '', content)
-        content = re.sub(r'\\journal\{[^}]+\}', '', content)
-        content = re.sub(r'\\begin\{frontmatter\}', '', content)
-        content = re.sub(r'\\end\{frontmatter\}', '', content)
-        content = re.sub(r'\\begin\{abstract\}', '', content)
-        content = re.sub(r'\\end\{abstract\}', '', content)
-        content = re.sub(r'\\begin\{keyword\}', '', content)
-        content = re.sub(r'\\end\{keyword\}', '', content)
-        content = re.sub(r'\\appendix', '', content)
-        
-        # Remove \addtoreset and similar counter commands
-        content = re.sub(r'\\addtoreset\{[^}]+\}\{[^}]+\}', '', content)
-        content = re.sub(r'\\addtoreset\w*', '', content)
-        content = re.sub(r'\\@addtoreset\{[^}]+\}\{[^}]+\}', '', content)
-        
-        # Remove lines that are just bracketed theorem names at the start
-        lines = content.split('\n')
-        cleaned_lines = []
-        found_content = False
-        for line in lines:
-            stripped = line.strip()
-            # Skip lines that look like theorem environment artifacts
-            if not found_content:
-                if stripped in ['', 'Theorem', 'Proposition', 'Lemma', 'Corollary', 'Definition', 'Example', 
-                              'Remark', 'Claim', 'Conjecture', 'Assertion', 'Exercise', 'Assumption', 'Question']:
-                    continue
-                # Skip bracketed theorem references like "[theorem]" or "\[theorem\]"
-                if re.match(r'^[\[\]\\]+(?:theorem|proposition|lemma|corollary|definition)[\[\]\\]*$', stripped, re.IGNORECASE):
-                    continue
-            if stripped:
-                found_content = True
-            cleaned_lines.append(line)
-        
-        content = '\n'.join(cleaned_lines)
-        
-        # Clean up theorem/proposition environment markers
-        content = re.sub(r'\\begin\{(theorem|proposition|lemma|corollary|definition|example|remark|proof)\}', '', content)
-        content = re.sub(r'\\end\{(theorem|proposition|lemma|corollary|definition|example|remark|proof)\}', '', content)
-        
-        return content
-    
-    def _simplify_math(self, content: str) -> str:
-        """Simplify mathematical notation for token efficiency.
-        
-        Only modifies LaTeX commands outside of math content.
-        """
-        # Replace \boldsymbol{x} with \mathbf{x}
-        content = re.sub(r'\\boldsymbol\{([^}]+)\}', r'\\mathbf{\1}', content)
-        
-        # Replace \operatorname{name} with just name
-        content = re.sub(r'\\operatorname\{([^}]+)\}', r'\1', content)
-        
-        # Remove \ensuremath wrapper commands
-        content = re.sub(r'\\ensuremath\{([^}]+)\}', r'\1', content)
-        
-        # Remove \mbox wrapper (but keep content)
-        content = re.sub(r'\\mbox\{([^}]+)\}', r'\1', content)
-        
-        # Replace \bf with \mathbf for bold in math
-        content = re.sub(r'\\bf\s+([a-zA-Z])', r'\\mathbf{\1}', content)
-        
-        # Simplify \left( ... \right) to ( ... )
-        # But be careful with nested structures
-        content = re.sub(r'\\left\(', '(', content)
-        content = re.sub(r'\\right\)', ')', content)
-        content = re.sub(r'\\left\[', '[', content)
-        content = re.sub(r'\\right\]', ']', content)
-        content = re.sub(r'\\left\{', '{', content)
-        content = re.sub(r'\\right\}', '}', content)
-        
-        # Clean up align environment markers in math
-        content = re.sub(r'\\begin\{align\*?\}', '', content)
-        content = re.sub(r'\\end\{align\*?\}', '', content)
-        content = re.sub(r'\\begin\{equation\*?\}', '', content)
-        content = re.sub(r'\\end\{equation\*?\}', '', content)
-        
-        # Simplify simple fractions in inline math
-        def simplify_frac(match):
-            num = match.group(1).strip()
-            den = match.group(2).strip()
-            # Only simplify if both are simple (single char or number)
-            if len(num) <= 2 and len(den) <= 2 and '/' not in num and '/' not in den:
-                # Check if numeric
-                if num.isdigit() and den.isdigit():
-                    return f'{num}/{den}'
-                # Check if simple variable
-                if num.isalpha() and den.isalpha() and len(num) == 1 and len(den) == 1:
-                    return f'{num}/{den}'
-            return match.group(0)
-        
-        content = re.sub(r'\\frac\{([^}]+)\}\{([^}]+)\}', simplify_frac, content)
-        
-        return content
-    
-    def _clean_figures(self, content: str) -> str:
-        """Clean up figure references since we're skipping figures."""
-        # Replace figure markdown with placeholders
-        # ![caption](path) -> [Figure: caption]
-        fig_pattern = r'!\[([^\]]*)\]\([^)]+\)'
-        content = re.sub(fig_pattern, r'[Figure: \1]', content)
-        
-        # Remove width/height attributes from images
-        content = re.sub(r'\{width=[^}]+\}', '', content)
-        content = re.sub(r'\{height=[^}]+\}', '', content)
-        
-        # Clean up empty figure placeholders
-        content = re.sub(r'\[Figure:\s*\]', '[Figure]', content)
-        
-        # Convert HTML figure tags to markdown
-        # <figure>...</figure> -> [Figure: caption]
-        content = re.sub(r'<figure[^>]*>.*?<figcaption>(.*?)</figcaption>.*?</figure>', 
-                        r'[Figure: \1]', content, flags=re.DOTALL)
-        
-        return content
-    
-    def _clean_tables(self, content: str) -> str:
-        """Clean up LaTeX table artifacts."""
-        # Remove \centering command
-        content = re.sub(r'\\centering\b', '', content)
-        
-        # Remove \multirow commands (keep content)
-        content = re.sub(r'\\multirow\{[^}]+\}\{[^}]+\}\{([^}]+)\}', r'\1', content)
-        
-        # Remove \cline commands
-        content = re.sub(r'\\cline\{[^}]+\}', '', content)
-        
-        # Clean up LaTeX tabular environment (simplified - just remove the markers)
-        content = re.sub(r'\\begin\{tabular\}[^\n]*', '', content)
-        content = re.sub(r'\\end\{tabular\}', '', content)
-        content = re.sub(r'\\hline', '', content)
-        
-        return content
-    
     def split_appendix(self, content: str) -> Tuple[str, Optional[str]]:
         """Split content into main body and appendix.
         
         Returns:
             Tuple of (main_content, appendix_content or None)
         """
-        # Look for appendix heading patterns
-        appendix_patterns = [
-            r'^#{1,6}\s*Appendix',
-            r'^#{1,6}\s*A\.\s+\w',  # "A. Title"
-            r'^#{1,6}\s*A\s+\w',    # "A Title"
-        ]
-        
         lines = content.split('\n')
         appendix_start = None
         
         for i, line in enumerate(lines):
-            for pattern in appendix_patterns:
+            for pattern in self.APPENDIX_PATTERNS:
                 if re.match(pattern, line, re.IGNORECASE):
                     appendix_start = i
                     break

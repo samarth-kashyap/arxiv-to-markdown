@@ -2,8 +2,9 @@
 
 import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, List, Optional, Tuple
 
 import pypandoc
 
@@ -15,52 +16,406 @@ class LaTeXConversionError(Exception):
     pass
 
 
-def _remove_nested_command(content: str, cmd: str) -> str:
-    """Remove LaTeX command with potentially nested braces.
+@dataclass
+class CommandPattern:
+    """Definition of a LaTeX command pattern to remove/process.
     
-    Handles commands that may span multiple lines and have nested braces.
-    Also handles optional arguments like \\command[opt]{...}
-    
-    Args:
-        content: LaTeX content
-        cmd: Command name without backslash (e.g., 'address', 'thanks')
-        
-    Returns:
-        Content with command removed
+    Attributes:
+        name: Command name (without backslash)
+        pattern: Regex pattern to match the command
+        replacement: Replacement string (default: empty string)
+        handler: Optional custom handler function for complex cases
+        flags: Regex flags
     """
-    pattern = rf'\\{cmd}(?:\[[^\]]*\])?\{{'
-    result = []
-    i = 0
+    name: str
+    pattern: str
+    replacement: str = ''
+    handler: Optional[Callable[[str, 'CommandPattern'], str]] = None
+    flags: int = 0
+
+
+class LaTeXCommandProcessor:
+    """Process LaTeX commands using declarative patterns.
     
-    while i < len(content):
-        match = re.search(pattern, content[i:])
-        if not match:
-            result.append(content[i:])
-            break
+    This class provides a clean, extensible way to define and apply
+    LaTeX command transformations.
+    """
+    
+    # Standard command categories organized by behavior
+    SIMPLE_COMMANDS = [
+        # Document structure
+        'maketitle', 'tableofcontents', 'listoffigures', 'listoftables',
+        # Page breaks
+        'newpage', 'pagebreak', 'nopagebreak', 'clearpage',
+        # Vertical spacing
+        'smallskip', 'medskip', 'bigskip',
+        # Formatting
+        'centering', 'raggedright', 'raggedleft',
+    ]
+    
+    ENVIRONMENTS_TO_REMOVE = [
+        'frontmatter', 'abstract', 'keyword', 'keywords',
+        'icmlauthorlist', 'IEEEkeywords',
+    ]
+    
+    COMMANDS_WITH_SIMPLE_ARGS = [
+        # Document structure
+        (r'documentclass(?:\[[^\]]*\])?\{[^}]*\}', ''),
+        (r'title\{[^}]*\}', ''),
+        (r'date\{[^}]*\}', ''),
+        (r'journal\{[^}]*\}', ''),
+        # Packages
+        (r'usepackage(?:\[[^\]]*\])?\{[^}]*\}', ''),
+        # Metadata
+        (r'subjclass(?:\[[^\]]*\])?\{[^}]*\}', ''),
+        (r'hyphenation\{[^}]*\}', ''),
+        (r'setcounter\{[^}]+\}\{[^}]+\}', ''),
+        # Theorem setup
+        (r'theoremstyle\{[^}]*\}', ''),
+        # Formatting - keep the content (last argument)
+        (r'textcolor\{[^}]+\}\{([^}]+)\}', r'\1'),
+        (r'colorbox\{[^}]+\}\{([^}]+)\}', r'\1'),
+        (r'fcolorbox\{[^}]+\}\{[^}]+\}\{([^}]+)\}', r'\1'),
+    ]
+    
+    COUNTER_COMMANDS = [
+        (r'addtoreset\{[^}]+\}\{[^}]+\}', ''),
+        (r'addtoreset\w*', ''),
+        (r'@addtoreset\{[^}]+\}\{[^}]+\}', ''),
+        (r'numberwithin\{[^}]+\}\{[^}]+\}', ''),
+    ]
+    
+    CONDITIONAL_COMMANDS = [
+        (r'ifdefined\\[a-zA-Z]+', ''),
+        (r'else\b', ''),
+        (r'fi\b', ''),
+        (r'makeatletter\b', ''),
+        (r'makeatother\b', ''),
+    ]
+    
+    ICML_COMMANDS = [
+        (r'icmlkeywords\{[^}]*\}', ''),
+        (r'icmlsetsymbol\{[^}]*\}\{[^}]*\}', ''),
+        (r'icmlEqualContribution', ''),
+        (r'icmlIntern', ''),
+        (r'icmladdress\{[^}]*\}', ''),
+        (r'printAffiliationsAndNotice\{[^}]*\}', ''),
+        (r'toptitlebar', ''),
+        (r'bottomtitlebar', ''),
+    ]
+    
+    IEEE_COMMANDS = [
+        (r'IEEEPARstart\{[^}]*\}\{[^}]*\}', ''),
+        (r'IEEEmembership\{[^}]*\}', ''),
+        (r'IEEEproof', ''),
+        (r'IEEEkeywords', ''),
+    ]
+    
+    SPACING_COMMANDS = [
+        (r'vskip\s+[\d.]+\w*', ''),
+        (r'vspace\{[^}]*\}', ''),
+        (r'hspace\{[^}]*\}', ''),
+    ]
+    
+    CITATION_FONT_COMMANDS = [
+        (r'citenamefont\{([^}]+)\}', r'\1'),
+        (r'bibfnamefont\{([^}]+)\}', r'\1'),
+        (r'bibnamefont\{([^}]+)\}', r'\1'),
+    ]
+    
+    PROBLEMATIC_DEFS = [
+        r'DeclarePairedDelimiter\{[^}]+\}\{[^}]+\}\{[^}]+\}',
+        r'DeclarePairedDelimiterX[^\n]*\n[^}]+\}',
+        r'DeclareRobustCommand\{[^}]+\}\[[^\]]*\]\{[^}]+\}',
+        r'parhead\b',
+        r'soulregister[^\n]*',
+    ]
+    
+    def __init__(self):
+        self.patterns: List[CommandPattern] = []
+        self._build_patterns()
+    
+    def _build_patterns(self):
+        """Build all command patterns."""
+        # Simple commands (just the command name)
+        for cmd in self.SIMPLE_COMMANDS:
+            self.patterns.append(CommandPattern(
+                name=cmd,
+                pattern=rf'\\{cmd}\b',
+                replacement=''
+            ))
+        
+        # Environments to remove entirely
+        for env in self.ENVIRONMENTS_TO_REMOVE:
+            self.patterns.append(CommandPattern(
+                name=f'begin/end_{env}',
+                pattern=rf'\\(?:begin|end)\{{{env}\}}',
+                replacement=''
+            ))
+        
+        # Commands with simple arguments
+        for pattern, replacement in self.COMMANDS_WITH_SIMPLE_ARGS:
+            cmd_name = pattern.split('\\')[1].split('{')[0].split('[')[0]
+            self.patterns.append(CommandPattern(
+                name=cmd_name,
+                pattern=rf'\\{pattern}',
+                replacement=replacement
+            ))
+        
+        # Counter commands
+        for pattern, replacement in self.COUNTER_COMMANDS:
+            self.patterns.append(CommandPattern(
+                name='counter_cmd',
+                pattern=rf'\\{pattern}',
+                replacement=replacement
+            ))
+        
+        # Conditional commands
+        for pattern, replacement in self.CONDITIONAL_COMMANDS:
+            self.patterns.append(CommandPattern(
+                name='conditional',
+                pattern=rf'\\{pattern}',
+                replacement=replacement
+            ))
+        
+        # Conference-specific commands
+        for pattern, replacement in self.ICML_COMMANDS:
+            cmd_name = pattern.split('{')[0].split('[')[0].replace('\\', '')
+            self.patterns.append(CommandPattern(
+                name=f'icml_{cmd_name}',
+                pattern=rf'\\{pattern}',
+                replacement=replacement
+            ))
+        
+        for pattern, replacement in self.IEEE_COMMANDS:
+            cmd_name = pattern.split('{')[0].replace('\\', '')
+            self.patterns.append(CommandPattern(
+                name=f'ieee_{cmd_name}',
+                pattern=rf'\\{pattern}',
+                replacement=replacement
+            ))
+        
+        # Spacing commands
+        for pattern, replacement in self.SPACING_COMMANDS:
+            self.patterns.append(CommandPattern(
+                name='spacing',
+                pattern=rf'\\{pattern}',
+                replacement=replacement
+            ))
+        
+        # Citation font commands (keep content)
+        for pattern, replacement in self.CITATION_FONT_COMMANDS:
+            cmd_name = pattern.split('{')[0].replace('\\', '')
+            self.patterns.append(CommandPattern(
+                name=cmd_name,
+                pattern=rf'\\{pattern}',
+                replacement=replacement
+            ))
+        
+        # Problematic definitions
+        for pattern in self.PROBLEMATIC_DEFS:
+            cmd_name = pattern.split('{')[0].split('\\')[1].split('[')[0]
+            self.patterns.append(CommandPattern(
+                name=f'def_{cmd_name}',
+                pattern=rf'\\{pattern}',
+                replacement='',
+                flags=re.DOTALL
+            ))
+        
+        # Special handlers for complex cases
+        self.patterns.append(CommandPattern(
+            name='newtheorem',
+            pattern=rf'\\newtheorem\{{[^}}]+\}}(?:\[[^\]]*\])?(?:\{{\{{?[^}}]*\}}?\}})?(?:\[[^\]]*\])?',
+            replacement='',
+            handler=self._handle_newtheorem
+        ))
+        
+        self.patterns.append(CommandPattern(
+            name='twocolumn',
+            pattern=r'\\twocolumn\[',
+            replacement='',
+            handler=self._handle_twocolumn
+        ))
+    
+    def process(self, content: str) -> str:
+        """Process all registered patterns against content."""
+        for pattern_def in self.patterns:
+            if pattern_def.handler:
+                content = pattern_def.handler(content, pattern_def)
+            else:
+                content = re.sub(
+                    pattern_def.pattern,
+                    pattern_def.replacement,
+                    content,
+                    flags=pattern_def.flags
+                )
+        
+        # Clean up raw_tex attributes from pandoc
+        content = re.sub(r'`[^`]*`\{=latex\}', '', content)
+        
+        return content
+    
+    def _handle_newtheorem(self, content: str, pattern_def: CommandPattern) -> str:
+        """Handle newtheorem definitions (with optional args and double braces)."""
+        return re.sub(pattern_def.pattern, pattern_def.replacement, content)
+    
+    def _handle_twocolumn(self, content: str, pattern_def: CommandPattern) -> str:
+        """Remove twocolumn wrapper but keep inner content."""
+        pattern = r'\\twocolumn\['
+        result = []
+        i = 0
+        
+        while i < len(content):
+            match = re.search(pattern, content[i:])
+            if not match:
+                result.append(content[i:])
+                break
             
-        result.append(content[i:i + match.start()])
+            result.append(content[i:i + match.start()])
+            
+            # Find matching closing bracket
+            start = i + match.end()
+            bracket_count = 1
+            j = start
+            
+            while j < len(content) and bracket_count > 0:
+                if content[j] == '[':
+                    bracket_count += 1
+                elif content[j] == ']':
+                    bracket_count -= 1
+                j += 1
+            
+            # Append inner content (j-1 because j is past the closing bracket)
+            if bracket_count == 0:
+                inner_content = content[start:j-1]
+                result.append(inner_content)
+            else:
+                result.append(content[start:])
+                break
+            
+            i = j
         
-        start = i + match.end()
-        brace_count = 1
-        j = start
-        
-        while j < len(content) and brace_count > 0:
-            if content[j] == '{':
-                brace_count += 1
-            elif content[j] == '}':
-                brace_count -= 1
-            j += 1
-        
-        i = j
+        return ''.join(result)
     
-    return ''.join(result)
+    def remove_nested_command(self, content: str, cmd: str) -> str:
+        """Remove a LaTeX command with potentially nested braces.
+        
+        Handles commands that may span multiple lines and have nested braces.
+        Also handles optional arguments like \\command[opt]{...}
+        
+        Args:
+            content: LaTeX content
+            cmd: Command name without backslash
+            
+        Returns:
+            Content with command removed
+        """
+        pattern = rf'\\{cmd}(?:\[[^\]]*\])?\{{'
+        result = []
+        i = 0
+        
+        while i < len(content):
+            match = re.search(pattern, content[i:])
+            if not match:
+                result.append(content[i:])
+                break
+            
+            # Append content before command
+            result.append(content[i:i + match.start()])
+            
+            # Find matching closing brace
+            start = i + match.end()
+            brace_count = 1
+            j = start
+            
+            while j < len(content) and brace_count > 0:
+                if content[j] == '{':
+                    brace_count += 1
+                elif content[j] == '}':
+                    brace_count -= 1
+                j += 1
+            
+            i = j
+        
+        return ''.join(result)
+    
+    def remove_newcommand_definitions(self, content: str) -> str:
+        """Remove \\newcommand, \\renewcommand, \\providecommand definitions.
+        
+        These have a special structure: \\cmd{\\name}[nargs]{definition}
+        where nargs is optional and there can be multiple definition blocks.
+        """
+        cmd_types = ['newcommand', 'renewcommand', 'providecommand', 'DeclareMathOperator']
+        
+        for cmd_type in cmd_types:
+            # Pattern matches: \\cmd{\\name} or \\cmd{\\name}[nargs]
+            pattern = rf'\\{re.escape(cmd_type)}(?:\*)?\{{[^}}]+\}}(?:\[[^\]]*\])?'
+            
+            result = []
+            i = 0
+            
+            while i < len(content):
+                match = re.search(pattern, content[i:])
+                if not match:
+                    result.append(content[i:])
+                    break
+                
+                # Append content before command
+                result.append(content[i:i + match.start()])
+                
+                # Find all definition blocks
+                start = i + match.end()
+                brace_count = 0
+                j = start
+                in_brace = False
+                
+                while j < len(content):
+                    if content[j] == '{':
+                        brace_count += 1
+                        in_brace = True
+                    elif content[j] == '}':
+                        brace_count -= 1
+                        if brace_count == 0 and in_brace:
+                            j += 1
+                            # Check for another brace block
+                            if j < len(content) and content[j] == '{':
+                                in_brace = False
+                                continue
+                            break
+                    j += 1
+                
+                i = j
+            
+            content = ''.join(result)
+        
+        return content
 
 
 class LaTeXConverter:
     """Convert LaTeX to Markdown using Pandoc."""
     
+    # Author-related commands that need nested brace handling
+    AUTHOR_COMMANDS = [
+        'email', 'affiliation', 'institute', 'address', 
+        'thanks', 'author', 'affiliation',
+    ]
+    
+    # ICML-specific nested commands
+    ICML_NESTED_COMMANDS = [
+        'icmltitle', 'icmltitlerunning', 'icmlauthor',
+        'icmlaffiliation', 'icmlcorrespondingauthor',
+    ]
+    
+    # Graphics/color commands with nested braces
+    GRAPHICS_COMMANDS = [
+        'usetikzlibrary', 'tikzset', 'pgfplotsset',
+        'definecolor', 'color', 'colorlet',
+        'keyword', 'keywords', 'pacs', 'pagecolor',
+    ]
+    
     def __init__(self, bib_handler: Optional[BibliographyHandler] = None):
         self.bib_handler = bib_handler
+        self.command_processor = LaTeXCommandProcessor()
     
     def convert(self, tex_content: str, filter_path: Optional[Path] = None) -> str:
         """Convert LaTeX content to Markdown.
@@ -125,254 +480,32 @@ class LaTeXConverter:
     
     def _preprocess_commands(self, content: str) -> str:
         """Remove LaTeX commands that don't convert well to markdown.
-
-        Only removes commands outside of math environments.
-        Note: \newcommand, \renewcommand, etc. are now preserved and expanded
-        by pandoc's +latex_macros extension.
+        
+        Uses the LaTeXCommandProcessor for systematic command removal.
         """
-        # Document structure commands
-        content = re.sub(r'\\maketitle\b', '', content)
-        content = re.sub(r'\\documentclass(?:\[[^\]]*\])?\{[^}]*\}', '', content)
-        content = re.sub(r'\\tableofcontents\b', '', content)
-
-        # Package and preamble commands (simple, single-line)
-        content = re.sub(r'\\usepackage(?:\[[^\]]*\])?\{[^}]*\}', '', content)
-        content = re.sub(r'\\title\{[^}]*\}', '', content)
-        content = re.sub(r'\\date\{[^}]*\}', '', content)
-
-        # Author information commands (handle multi-line with nested braces)
-        author_cmds = ['email', 'affiliation', 'institute', 'address', 'thanks', 'author']
-        for cmd in author_cmds:
-            content = _remove_nested_command(content, cmd)
-
-        # Frontmatter commands (elsarticle, revtex, etc.)
-        content = re.sub(r'\\begin\{frontmatter\}', '', content)
-        content = re.sub(r'\\end\{frontmatter\}', '', content)
-        content = re.sub(r'\\begin\{abstract\}', '', content)
-        content = re.sub(r'\\end\{abstract\}', '', content)
-        content = re.sub(r'\\begin\{keyword\}', '', content)
-        content = re.sub(r'\\end\{keyword\}', '', content)
-        content = re.sub(r'\\journal\{[^}]*\}', '', content)
-        content = re.sub(r'\\appendix', '', content)
+        # Apply standard command patterns
+        content = self.command_processor.process(content)
         
-        # Additional elsarticle-specific cleanup (with optional arguments)
-        content = re.sub(r'\\affiliation(?:\[[^\]]*\])?\{[^}]*\}', '', content)
-        content = re.sub(r'\\author(?:\[[^\]]*\])?\{[^}]*\}', '', content)
-
-        # Metadata and classification commands
-        meta_cmds_simple = [
-            (r'\\makeatletter\b', ''),
-            (r'\\makeatother\b', ''),
-            (r'\\numberwithin\{[^}]+\}\{[^}]+\}', ''),
-            (r'\\hyphenation\{[^}]+\}', ''),
-            (r'\\subjclass(?:\[[^\]]*\])?\{[^}]*\}', ''),
-            (r'\\setcounter\{[^}]+\}\{[^}]+\}', ''),
-            (r'\\addtoreset\{[^}]+\}\{[^}]+\}', ''),
-            (r'\\addtoreset\w*', ''),
-            (r'\\@addtoreset\{[^}]+\}\{[^}]+\}', ''),
-        ]
-        for pattern, repl in meta_cmds_simple:
-            content = re.sub(pattern, repl, content)
-
-        # Theorem and environment definitions (handle double braces like \newtheorem{name}{{Definition}})
-        content = re.sub(r'\\newtheorem\{[^}]+\}(?:\[[^\]]*\])?(?:\{\{?[^}]*\}?\})?(?:\[[^\]]*\])?', '', content)
-        content = re.sub(r'\\theoremstyle\{[^}]+\}', '', content)
-
-        # Remove conditional compilation commands (\ifdefined\NAME, not \ifdefined{NAME})
-        content = re.sub(r'\\ifdefined\\[a-zA-Z]+', '', content)
-        content = re.sub(r'\\else\b', '', content)
-        content = re.sub(r'\\fi\b', '', content)
-
-        # Remove IEEE-specific commands
-        content = re.sub(r'\\IEEEPARstart\{[^}]*\}\{[^}]*\}', '', content)
-        content = re.sub(r'\\IEEEmembership\{[^}]*\}', '', content)
-        content = re.sub(r'\\IEEEproof', '', content)
-        content = re.sub(r'\\IEEEkeywords', '', content)
-        content = re.sub(r'\\end\{IEEEkeywords\}', '', content)
-        content = re.sub(r'\\begin\{keywords\}', '', content)
-        content = re.sub(r'\\end\{keywords\}', '', content)
-        content = re.sub(r'\\thanks\{[^}]*\}', '', content)
-
-        # Handle ICML (and similar conference) specific commands
-        # Remove icmltitle but keep content (it's metadata, not body)
-        content = _remove_nested_command(content, 'icmltitle')
-        content = _remove_nested_command(content, 'icmltitlerunning')
-        content = _remove_nested_command(content, 'icmlauthor')
-        content = _remove_nested_command(content, 'icmlaffiliation')
-        content = _remove_nested_command(content, 'icmlcorrespondingauthor')
-        content = re.sub(r'\\icmlkeywords\{[^}]*\}', '', content)
-        content = re.sub(r'\\icmlsetsymbol\{[^}]*\}\{[^}]*\}', '', content)
-        content = re.sub(r'\\icmlEqualContribution', '', content)
-        content = re.sub(r'\\icmlIntern', '', content)
-        content = re.sub(r'\\icmladdress\{[^}]*\}', '', content)
-        content = re.sub(r'\\printAffiliationsAndNotice\{[^}]*\}', '', content)
+        # Remove \\newcommand/\\renewcommand definitions
+        content = self.command_processor.remove_newcommand_definitions(content)
         
-        # ICML environments
-        content = re.sub(r'\\begin\{icmlauthorlist\}', '', content)
-        content = re.sub(r'\\end\{icmlauthorlist\}', '', content)
+        # Handle author information commands with nested braces
+        for cmd in self.AUTHOR_COMMANDS:
+            content = self.command_processor.remove_nested_command(content, cmd)
         
-        # Title bars and formatting
-        content = re.sub(r'\\toptitlebar', '', content)
-        content = re.sub(r'\\bottomtitlebar', '', content)
+        # Handle ICML nested commands
+        for cmd in self.ICML_NESTED_COMMANDS:
+            content = self.command_processor.remove_nested_command(content, cmd)
         
-        # Remove twocolumn wrapper but keep content: \twocolumn[...]
-        # This requires special handling because the content can span multiple lines
-        # and contain nested brackets
-        content = self._remove_twocolumn_wrapper(content)
-
-        # Page and formatting commands
-        content = re.sub(r'\\newpage\b', '', content)
-        content = re.sub(r'\\pagebreak\b', '', content)
-        content = re.sub(r'\\nopagebreak\b', '', content)
-        content = re.sub(r'\\clearpage\b', '', content)
+        # Handle graphics commands with nested braces
+        for cmd in self.GRAPHICS_COMMANDS:
+            content = self.command_processor.remove_nested_command(content, cmd)
         
-        # Vertical spacing commands
-        content = re.sub(r'\\vskip\s+[\d.]+\w*', '', content)
-        content = re.sub(r'\\vspace\{[^}]*\}', '', content)
-        content = re.sub(r'\\hspace\{[^}]*\}', '', content)
-        content = re.sub(r'\\smallskip\b', '', content)
-        content = re.sub(r'\\medskip\b', '', content)
-        content = re.sub(r'\\bigskip\b', '', content)
-
-        # Problematic environments
+        # Remove bibunit environment markers
         content = re.sub(r'\\begin\{bibunit\}', '', content)
         content = re.sub(r'\\end\{bibunit\}', '', content)
-
-        # Custom command definitions that confuse Pandoc
-        cmd_defs = [
-            r'\\DeclarePairedDelimiter\{[^}]+\}\{[^}]+\}\{[^}]+\}',
-            r'\\DeclarePairedDelimiterX[^\n]*\n[^}]+\}',
-            r'\\DeclareRobustCommand\{[^}]+\}\[[^\]]*\]\{[^}]+\}',
-            r'\\parhead\b',
-            r'\\soulregister[^\n]*',
-        ]
-        for pattern in cmd_defs:
-            content = re.sub(pattern, '', content, flags=re.DOTALL)
-
-        # Citation formatting commands (extract content only)
-        cite_formats = [
-            (r'\\citenamefont\{([^}]+)\}', r'\1'),
-            (r'\\bibfnamefont\{([^}]+)\}', r'\1'),
-            (r'\\bibnamefont\{([^}]+)\}', r'\1'),
-        ]
-        for pattern, repl in cite_formats:
-            content = re.sub(pattern, repl, content)
-
-        # Graphics and color commands (nested braces)
-        graphics_cmds = [
-            'usetikzlibrary', 'tikzset', 'pgfplotsset',
-            'definecolor', 'color', 'colorlet',
-            'keyword', 'keywords', 'pacs', 'pagecolor',
-            'textcolor', 'colorbox', 'fcolorbox'
-        ]
-        for cmd in graphics_cmds:
-            content = _remove_nested_command(content, cmd)
         
-        # Note: Color macros (\red, \blue, etc.) are now handled by pandoc's
-        # +latex_macros extension which expands them properly. We don't remove
-        # them here to avoid breaking \newcommand definitions like:
-        #   \newcommand{\red}[1]{\textcolor{red}{#1}}
-
-        # Remove raw_tex attributes from pandoc output
-        content = re.sub(r'`[^`]*`\{=latex\}', '', content)
-
         return content
-    
-    def _remove_newcommand_definitions(self, content: str, cmd_type: str) -> str:
-        """Remove \newcommand, \renewcommand, etc. definitions.
-        
-        These have a special structure: \\cmd{\\name}[nargs]{definition}
-        where nargs is optional and there can be multiple definition blocks.
-        """
-        # Pattern matches: \cmd{\name} or \cmd{\name}[nargs]
-        pattern = rf'\\{re.escape(cmd_type)}(?:\*)?\{{[^}}]+\}}(?:\[[^\]]*\])?'
-        
-        result = []
-        i = 0
-        
-        while i < len(content):
-            match = re.search(pattern, content[i:])
-            if not match:
-                result.append(content[i:])
-                break
-            
-            # Append content before command
-            result.append(content[i:i + match.start()])
-            
-            # Find all the definition blocks (braced content)
-            start = i + match.end()
-            brace_count = 0
-            j = start
-            in_brace = False
-            
-            while j < len(content):
-                if content[j] == '{':
-                    brace_count += 1
-                    in_brace = True
-                elif content[j] == '}':
-                    brace_count -= 1
-                    if brace_count == 0 and in_brace:
-                        # Finished one definition block
-                        j += 1
-                        # Check if there's another brace immediately after
-                        if j < len(content) and content[j] == '{':
-                            in_brace = False
-                            continue
-                        else:
-                            break
-                j += 1
-            
-            # Move past the command and its definition
-            i = j
-        
-        return ''.join(result)
-    
-    def _remove_twocolumn_wrapper(self, content: str) -> str:
-        """Remove \twocolumn[...] wrapper but keep the content inside.
-        
-        ICML and similar templates use \twocolumn[...] to place the title,
-        authors, and abstract in a single column at the top. We want to
-        remove the wrapper but preserve the content.
-        """
-        # Pattern to match \twocolumn[
-        pattern = r'\\twocolumn\['
-        
-        result = []
-        i = 0
-        
-        while i < len(content):
-            match = re.search(pattern, content[i:])
-            if not match:
-                result.append(content[i:])
-                break
-            
-            # Append content before the twocolumn
-            result.append(content[i:i + match.start()])
-            
-            # Find the matching closing bracket
-            start = i + match.end()
-            bracket_count = 1
-            j = start
-            
-            while j < len(content) and bracket_count > 0:
-                if content[j] == '[':
-                    bracket_count += 1
-                elif content[j] == ']':
-                    bracket_count -= 1
-                j += 1
-            
-            # Append the content inside the brackets (j-1 because j is past the closing bracket)
-            if bracket_count == 0:
-                inner_content = content[start:j-1]
-                result.append(inner_content)
-            else:
-                # No matching bracket found, keep everything
-                result.append(content[start:])
-                break
-            
-            i = j
-        
-        return ''.join(result)
     
     def _postprocess_citations(self, content: str) -> str:
         """Post-process citation keys in markdown output.
@@ -382,17 +515,19 @@ class LaTeXConverter:
         if not self.bib_handler:
             return content
         
+        # Store reference to avoid None checks in nested functions
+        bib_handler = self.bib_handler
+        
         # Handle multiple citations: [@key1; @key2; @key3]
         multi_cite_pattern = r'\[(@[a-zA-Z0-9_-]+(?:;\s*@[a-zA-Z0-9_-]+)*)\]'
         
         def replace_multi_cite(match):
             cites_str = match.group(1)
-            # Extract individual keys
             keys = re.findall(r'@([a-zA-Z0-9_-]+)', cites_str)
             formatted = []
             for key in keys:
-                if key in self.bib_handler.citations:
-                    formatted.append(self.bib_handler.format_citation_markdown(key))
+                if key in bib_handler.citations:
+                    formatted.append(bib_handler.format_citation_markdown(key))
                 else:
                     formatted.append(f'[@{key}]')
             return '; '.join(formatted) if formatted else match.group(0)
@@ -404,8 +539,8 @@ class LaTeXConverter:
         
         def replace_single_cite(match):
             key = match.group(1)
-            if key in self.bib_handler.citations:
-                return self.bib_handler.format_citation_markdown(key)
+            if key in bib_handler.citations:
+                return bib_handler.format_citation_markdown(key)
             return match.group(0)
         
         content = re.sub(single_cite_pattern, replace_single_cite, content)
@@ -413,33 +548,33 @@ class LaTeXConverter:
         return content
     
     def _preprocess_references(self, content: str) -> str:
-        r"""Pre-process reference commands (\ref, \eqref, etc.).
+        r"""Pre-process reference commands (\\ref, \\eqref, etc.).
         
-        Converts references like "Equation \ref{eq:1}" to just "Equation".
+        Converts references like "Equation \\ref{eq:1}" to just "Equation".
         """
-        # Match patterns like "Equation \ref{...}", "Fig. \ref{...}", etc.
+        # Match patterns like "Equation \\ref{...}", "Fig. \\ref{...}", etc.
         ref_context_pattern = r'(Equation|Eq\.?|Fig\.?|Figure|Table|Tab\.?|Section|Sec\.)\s*\\(?:eq)?ref\{[^}]+\}'
         
         def replace_ref_context(match):
-            # Keep just the type (Equation, Figure, etc.)
             ref_type = match.group(1)
             # Normalize abbreviations
-            if ref_type.lower() in ['eq.', 'eq']:
+            ref_lower = ref_type.lower()
+            if ref_lower in ['eq.', 'eq']:
                 return 'Equation'
-            elif ref_type.lower() in ['fig.', 'fig']:
+            elif ref_lower in ['fig.', 'fig']:
                 return 'Figure'
-            elif ref_type.lower() in ['tab.', 'tab']:
+            elif ref_lower in ['tab.', 'tab']:
                 return 'Table'
-            elif ref_type.lower() in ['sec.', 'sec']:
+            elif ref_lower in ['sec.', 'sec']:
                 return 'Section'
             return ref_type
         
         content = re.sub(ref_context_pattern, replace_ref_context, content, flags=re.IGNORECASE)
         
-        # Remove any remaining bare \ref{...} or \eqref{...}
+        # Remove any remaining bare \\ref{...} or \\eqref{...}
         content = re.sub(r'\\(?:eq)?ref\{[^}]+\}', '', content)
         
-        # Remove \label commands
+        # Remove \\label commands
         content = re.sub(r'\\label\{[^}]+\}', '', content)
         
         return content
