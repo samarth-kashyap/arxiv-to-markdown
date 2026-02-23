@@ -551,10 +551,19 @@ class LaTeXConverter:
     def _preprocess_references(self, content: str) -> str:
         r"""Pre-process reference commands (\ref, \eqref, etc.).
         
-        For equations: Converts \label{eq:label} to equation number tags and 
-        \ref{eq:label}/\eqref{eq:label} to markdown links with equation numbers.
+        For equations: Converts \label{label} to equation number tags and 
+        \ref{label}/\eqref{label} to markdown links with equation numbers.
         For other references: Converts to just the reference type name.
         """
+        if not self.equation_numbers:
+            # No equation numbers to process, just remove refs and labels
+            content = re.sub(r'\\(?:eq)?ref\{[^}]+\}', '', content)
+            content = re.sub(r'\\label\{[^}]+\}', '', content)
+            return content
+        
+        # Build a set of equation labels for fast lookup
+        eq_labels = set(self.equation_numbers.keys())
+        
         # Handle equation environments first - add equation numbers and anchors
         # Match equation environments with optional labels inside
         eq_env_pattern = r'\\begin\{(equation|align|align\*|gather|gather\*)\}(.*?)\\end\{\1\}'
@@ -564,10 +573,10 @@ class LaTeXConverter:
             env_content = match.group(2)
             
             # Check for label in the equation content
-            label_match = re.search(r'\\label\{(eq:[^}]+)\}', env_content)
+            label_match = re.search(r'\\label\{([^}]+)\}', env_content)
             if label_match:
                 label = label_match.group(1)
-                if label in self.equation_numbers:
+                if label in eq_labels:
                     eq_num = self.equation_numbers[label]
                     # Remove the label from inside the equation and add tag outside
                     env_content_clean = re.sub(r'\\label\{[^}]+\}', '', env_content)
@@ -579,25 +588,36 @@ class LaTeXConverter:
         
         content = re.sub(eq_env_pattern, process_equation_env, content, flags=re.DOTALL)
         
-        # Handle equation references (\eqref{eq:label} and \ref{eq:label})
-        eq_ref_pattern = r'\\(?:eq)?ref\{(eq:[^}]+)\}'
+        # Handle equation references - match any \ref{label} or \eqref{label} 
+        # where label is in equation_numbers
+        # Pattern captures the label and we'll check if it's an equation label
+        ref_pattern = r'\\(?:eq)?ref\{([^}]+)\}'
         
         def replace_eq_ref(match):
             label = match.group(1)
-            if label in self.equation_numbers:
+            if label in eq_labels:
                 eq_num = self.equation_numbers[label]
                 return f'[({eq_num})](#{label})'
-            # Fallback to plain label if not found
-            return f'[{label}]'
+            # Not an equation label - check if it's in a context like "Eq. \ref{...}"
+            # Return empty for now, will be handled by ref_context_pattern
+            return match.group(0)
         
-        content = re.sub(eq_ref_pattern, replace_eq_ref, content)
+        content = re.sub(ref_pattern, replace_eq_ref, content)
         
-        # Match patterns like "Equation \ref{...}", "Fig. \ref{...}", etc. for non-equation refs
-        ref_context_pattern = r'(Equation|Eq\.?|Fig\.?|Figure|Table|Tab\.?|Section|Sec\.)\s*\\(?:eq)?ref\{[^}]+\}'
+        # Match patterns like "Equation \ref{...}", "Fig. \ref{...}", etc.
+        # Need to capture the label to check if it's an equation
+        ref_context_pattern = r'(Equation|Eq\.?|Fig\.?|Figure|Table|Tab\.?|Section|Sec\.)\s*\\(?:eq)?ref\{([^}]+)\}'
         
         def replace_ref_context(match):
             ref_type = match.group(1)
-            # Normalize abbreviations
+            label = match.group(2)
+            
+            # Check if this is an equation reference
+            if label in eq_labels:
+                eq_num = self.equation_numbers[label]
+                return f'Equation [({eq_num})](#{label})'
+            
+            # Normalize abbreviations for non-equation refs
             ref_lower = ref_type.lower()
             if ref_lower in ['eq.', 'eq']:
                 return 'Equation'
