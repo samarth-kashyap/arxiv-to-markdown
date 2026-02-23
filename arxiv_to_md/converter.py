@@ -94,7 +94,7 @@ class LaTeXConverter:
         try:
             # Build pandoc arguments
             extra_args = [
-                '--from=latex+raw_tex',
+                '--from=latex+raw_tex+latex_macros',
                 '--to=markdown',
                 '--mathjax',
                 '--wrap=none',
@@ -127,6 +127,8 @@ class LaTeXConverter:
         """Remove LaTeX commands that don't convert well to markdown.
 
         Only removes commands outside of math environments.
+        Note: \newcommand, \renewcommand, etc. are now preserved and expanded
+        by pandoc's +latex_macros extension.
         """
         # Document structure commands
         content = re.sub(r'\\maketitle\b', '', content)
@@ -191,11 +193,46 @@ class LaTeXConverter:
         content = re.sub(r'\\end\{keywords\}', '', content)
         content = re.sub(r'\\thanks\{[^}]*\}', '', content)
 
+        # Handle ICML (and similar conference) specific commands
+        # Remove icmltitle but keep content (it's metadata, not body)
+        content = _remove_nested_command(content, 'icmltitle')
+        content = _remove_nested_command(content, 'icmltitlerunning')
+        content = _remove_nested_command(content, 'icmlauthor')
+        content = _remove_nested_command(content, 'icmlaffiliation')
+        content = _remove_nested_command(content, 'icmlcorrespondingauthor')
+        content = re.sub(r'\\icmlkeywords\{[^}]*\}', '', content)
+        content = re.sub(r'\\icmlsetsymbol\{[^}]*\}\{[^}]*\}', '', content)
+        content = re.sub(r'\\icmlEqualContribution', '', content)
+        content = re.sub(r'\\icmlIntern', '', content)
+        content = re.sub(r'\\icmladdress\{[^}]*\}', '', content)
+        content = re.sub(r'\\printAffiliationsAndNotice\{[^}]*\}', '', content)
+        
+        # ICML environments
+        content = re.sub(r'\\begin\{icmlauthorlist\}', '', content)
+        content = re.sub(r'\\end\{icmlauthorlist\}', '', content)
+        
+        # Title bars and formatting
+        content = re.sub(r'\\toptitlebar', '', content)
+        content = re.sub(r'\\bottomtitlebar', '', content)
+        
+        # Remove twocolumn wrapper but keep content: \twocolumn[...]
+        # This requires special handling because the content can span multiple lines
+        # and contain nested brackets
+        content = self._remove_twocolumn_wrapper(content)
+
         # Page and formatting commands
         content = re.sub(r'\\newpage\b', '', content)
         content = re.sub(r'\\pagebreak\b', '', content)
         content = re.sub(r'\\nopagebreak\b', '', content)
         content = re.sub(r'\\clearpage\b', '', content)
+        
+        # Vertical spacing commands
+        content = re.sub(r'\\vskip\s+[\d.]+\w*', '', content)
+        content = re.sub(r'\\vspace\{[^}]*\}', '', content)
+        content = re.sub(r'\\hspace\{[^}]*\}', '', content)
+        content = re.sub(r'\\smallskip\b', '', content)
+        content = re.sub(r'\\medskip\b', '', content)
+        content = re.sub(r'\\bigskip\b', '', content)
 
         # Problematic environments
         content = re.sub(r'\\begin\{bibunit\}', '', content)
@@ -211,16 +248,6 @@ class LaTeXConverter:
         ]
         for pattern in cmd_defs:
             content = re.sub(pattern, '', content, flags=re.DOTALL)
-        
-        # Remove \newcommand and \renewcommand definitions (can have nested braces)
-        # These have structure: \newcommand{\name}[nargs]{definition}
-        content = self._remove_newcommand_definitions(content, 'newcommand')
-        content = self._remove_newcommand_definitions(content, 'renewcommand')
-        content = self._remove_newcommand_definitions(content, 'providecommand')
-        
-        # Remove \DeclareMathOperator
-        content = self._remove_newcommand_definitions(content, 'DeclareMathOperator')
-        content = self._remove_newcommand_definitions(content, 'DeclareMathOperator*')
 
         # Citation formatting commands (extract content only)
         cite_formats = [
@@ -241,18 +268,10 @@ class LaTeXConverter:
         for cmd in graphics_cmds:
             content = _remove_nested_command(content, cmd)
         
-        # Remove color macro definitions like \red, \blue, etc.
-        content = re.sub(r'\\[a-zA-Z]+color\{[^}]*\}', '', content)
-        
-        # Remove standalone color macros (often defined via \definecolor or \colorlet)
-        # These typically appear as \red, \blue, etc. followed by content in braces
-        color_macros = ['red', 'blue', 'green', 'black', 'white', 'yellow', 
-                       'cyan', 'magenta', 'brown', 'gray', 'grey', 'orange',
-                       'violet', 'purple', 'pink', 'teal', 'lime', 'olive',
-                       'magen', 'hlred', 'hlmag', 'hlblue', 'hlgreen', 'hlbrown']
-        for color in color_macros:
-            # Remove \color{content} or just \color when it appears as a macro
-            content = re.sub(rf'\\{color}(?:\{{[^}}]*\}})?', '', content)
+        # Note: Color macros (\red, \blue, etc.) are now handled by pandoc's
+        # +latex_macros extension which expands them properly. We don't remove
+        # them here to avoid breaking \newcommand definitions like:
+        #   \newcommand{\red}[1]{\textcolor{red}{#1}}
 
         # Remove raw_tex attributes from pandoc output
         content = re.sub(r'`[^`]*`\{=latex\}', '', content)
@@ -304,6 +323,53 @@ class LaTeXConverter:
                 j += 1
             
             # Move past the command and its definition
+            i = j
+        
+        return ''.join(result)
+    
+    def _remove_twocolumn_wrapper(self, content: str) -> str:
+        """Remove \twocolumn[...] wrapper but keep the content inside.
+        
+        ICML and similar templates use \twocolumn[...] to place the title,
+        authors, and abstract in a single column at the top. We want to
+        remove the wrapper but preserve the content.
+        """
+        # Pattern to match \twocolumn[
+        pattern = r'\\twocolumn\['
+        
+        result = []
+        i = 0
+        
+        while i < len(content):
+            match = re.search(pattern, content[i:])
+            if not match:
+                result.append(content[i:])
+                break
+            
+            # Append content before the twocolumn
+            result.append(content[i:i + match.start()])
+            
+            # Find the matching closing bracket
+            start = i + match.end()
+            bracket_count = 1
+            j = start
+            
+            while j < len(content) and bracket_count > 0:
+                if content[j] == '[':
+                    bracket_count += 1
+                elif content[j] == ']':
+                    bracket_count -= 1
+                j += 1
+            
+            # Append the content inside the brackets (j-1 because j is past the closing bracket)
+            if bracket_count == 0:
+                inner_content = content[start:j-1]
+                result.append(inner_content)
+            else:
+                # No matching bracket found, keep everything
+                result.append(content[start:])
+                break
+            
             i = j
         
         return ''.join(result)
