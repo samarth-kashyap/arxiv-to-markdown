@@ -81,19 +81,19 @@ class MarkdownCleaner:
     MATH_PATTERNS: List[CleanupPattern] = [
         # Simplify bold symbols
         CleanupPattern('boldsymbol', r'\\boldsymbol\{([^}]+)\}', r'\\mathbf{\1}'),
-        
+
         # Remove operatorname wrapper
         CleanupPattern('operatorname', r'\\operatorname\{([^}]+)\}', r'\1'),
-        
+
         # Remove ensuremath wrapper
         CleanupPattern('ensuremath', r'\\ensuremath\{([^}]+)\}', r'\1'),
-        
+
         # Remove mbox wrapper
         CleanupPattern('mbox', r'\\mbox\{([^}]+)\}', r'\1'),
-        
+
         # Simplify bold font commands
         CleanupPattern('bf_command', r'\\bf\s+([a-zA-Z])', r'\\mathbf{\1}'),
-        
+
         # Simplify left/right delimiters
         CleanupPattern('left_paren', r'\\left\(', '('),
         CleanupPattern('right_paren', r'\\right\)', ')'),
@@ -101,12 +101,22 @@ class MarkdownCleaner:
         CleanupPattern('right_bracket', r'\\right\]', ']'),
         CleanupPattern('left_brace', r'\\left\{', '{'),
         CleanupPattern('right_brace', r'\\right\}', '}'),
-        
+
         # Remove align environment markers
         CleanupPattern('align_begin', r'\\begin\{align\*?\}', ''),
         CleanupPattern('align_end', r'\\end\{align\*?\}', ''),
         CleanupPattern('equation_begin', r'\\begin\{equation\*?\}', ''),
         CleanupPattern('equation_end', r'\\end\{equation\*?\}', ''),
+
+        # Clean up equation tags and anchors - convert to numbered equations
+        CleanupPattern('equation_tag', r'\\tag\{(\d+)\}\s*<a name="([^"]+)"></a>', r' \(\1\) <a name="\2"></a>'),
+
+        # Remove raw LaTeX tag command if anchor wasn't processed
+        CleanupPattern('latex_tag', r'\\tag\{[^}]+\}', ''),
+
+        # Clean up extra blank lines in equations
+        CleanupPattern('equation_extra_lines', r'\$\$\s*\n\s*\n+', '$$\n'),
+        CleanupPattern('equation_end_lines', r'\n\s*\n+\s*\$\$', '\n$$'),
     ]
     
     FIGURE_PATTERNS: List[CleanupPattern] = [

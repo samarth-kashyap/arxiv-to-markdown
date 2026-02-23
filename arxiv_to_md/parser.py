@@ -27,6 +27,7 @@ class LaTeXParser:
         self._processed_files: Set[str] = set()  # Track to detect circular includes
         self.content = self._read_and_expand(tex_path)
         self.labels: Dict[str, str] = {}  # label -> type (fig, eq, sec, etc.)
+        self.equation_numbers: Dict[str, int] = {}  # label -> equation number
         self._extract_labels()
     
     def _read_and_expand(self, tex_path: Path, depth: int = 0) -> str:
@@ -115,20 +116,51 @@ class LaTeXParser:
         return content
     
     def _extract_labels(self):
-        r"""Extract all \label{} commands and categorize them by type."""
+        r"""Extract all \label{} commands and categorize them by type.
+        
+        Also tracks equation numbers for equation labels.
+        """
         label_pattern = r'\\label\{([^}]+)\}'
+        equation_pattern = r'\\begin\{(equation|align|align\*|gather|gather\*|multiline|multiline\*|eqnarray|eqnarray\*)\}'
         
         lines = self.content.split('\n')
+        equation_count = 0
+        current_eq_env = None
+        in_equation = False
+        
         for i, line in enumerate(lines):
+            # Track equation environments
+            eq_match = re.search(equation_pattern, line)
+            if eq_match:
+                current_eq_env = eq_match.group(1)
+                in_equation = True
+            
+            # Check for end of equation environment
+            if current_eq_env and re.search(rf'\\end\{{{re.escape(current_eq_env)}\}}', line):
+                in_equation = False
+                current_eq_env = None
+                equation_count += 1  # Count at end of environment
+            
+            # Check for display math (alternative equation syntax)
+            if not in_equation:
+                if line.strip() == '$$' or line.strip().startswith('$$'):
+                    # Toggle display math mode
+                    pass  # For now, only track explicit equation environments
+            
             for match in re.finditer(label_pattern, line):
                 label = match.group(1)
                 
-                # Get context (3 lines before and current line)
-                start = max(0, i - 3)
-                context = '\n'.join(lines[start:i+1])
-                
                 # Determine type from context
-                label_type = self._determine_label_type(context)
+                if in_equation or current_eq_env:
+                    # Label is inside an equation environment
+                    label_type = 'eq'
+                    self.equation_numbers[label] = equation_count + 1  # Current equation number
+                else:
+                    # Get context (3 lines before and current line)
+                    start = max(0, i - 3)
+                    context = '\n'.join(lines[start:i+1])
+                    label_type = self._determine_label_type(context)
+                
                 self.labels[label] = label_type
     
     def _determine_label_type(self, context: str) -> str:
