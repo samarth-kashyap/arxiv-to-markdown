@@ -34,6 +34,9 @@ class MarkdownPostProcessor:
         # Clean up figure references
         content = self._clean_figures(content)
         
+        # Clean up tables
+        content = self._clean_tables(content)
+        
         # Add bibliography if provided
         if bibliography:
             content = content.rstrip() + '\n' + bibliography
@@ -86,9 +89,12 @@ class MarkdownPostProcessor:
         for i, line in enumerate(lines):
             stripped = line.strip()
             # Skip empty lines and lines that start with LaTeX commands or look like residual content
+            # Also skip lines that are just "=" (pandoc header artifact) or start with "= "
             if (stripped == '' or 
                 stripped.startswith('\\') or 
                 stripped.startswith('rgb') or
+                stripped == '=' or
+                stripped.startswith('= ') or
                 stripped.startswith('Theorem') and i < 10 or
                 stripped.startswith('Proposition') and i < 10 or
                 stripped.startswith('Lemma') and i < 10 or
@@ -99,6 +105,18 @@ class MarkdownPostProcessor:
                 break
         
         content = '\n'.join(lines[start_idx:])
+        
+        # Remove specific LaTeX frontmatter commands that may still appear
+        content = re.sub(r'\\newsavebox\{[^}]+\}', '', content)
+        content = re.sub(r'\\sbox\{[^}]+\}\{[^}]+\}', '', content)
+        content = re.sub(r'\\journal\{[^}]+\}', '', content)
+        content = re.sub(r'\\begin\{frontmatter\}', '', content)
+        content = re.sub(r'\\end\{frontmatter\}', '', content)
+        content = re.sub(r'\\begin\{abstract\}', '', content)
+        content = re.sub(r'\\end\{abstract\}', '', content)
+        content = re.sub(r'\\begin\{keyword\}', '', content)
+        content = re.sub(r'\\end\{keyword\}', '', content)
+        content = re.sub(r'\\appendix', '', content)
         
         # Remove lines that are just bracketed theorem names at the start
         lines = content.split('\n')
@@ -133,6 +151,15 @@ class MarkdownPostProcessor:
         # Replace \operatorname{name} with just name
         content = re.sub(r'\\operatorname\{([^}]+)\}', r'\1', content)
         
+        # Remove \ensuremath wrapper commands
+        content = re.sub(r'\\ensuremath\{([^}]+)\}', r'\1', content)
+        
+        # Remove \mbox wrapper (but keep content)
+        content = re.sub(r'\\mbox\{([^}]+)\}', r'\1', content)
+        
+        # Replace \bf with \mathbf for bold in math
+        content = re.sub(r'\\bf\s+([a-zA-Z])', r'\\mathbf{\1}', content)
+        
         # Simplify \left( ... \right) to ( ... )
         # But be careful with nested structures
         content = re.sub(r'\\left\(', '(', content)
@@ -141,6 +168,12 @@ class MarkdownPostProcessor:
         content = re.sub(r'\\right\]', ']', content)
         content = re.sub(r'\\left\{', '{', content)
         content = re.sub(r'\\right\}', '}', content)
+        
+        # Clean up align environment markers in math
+        content = re.sub(r'\\begin\{align\*?\}', '', content)
+        content = re.sub(r'\\end\{align\*?\}', '', content)
+        content = re.sub(r'\\begin\{equation\*?\}', '', content)
+        content = re.sub(r'\\end\{equation\*?\}', '', content)
         
         # Simplify simple fractions in inline math
         def simplify_frac(match):
@@ -173,6 +206,29 @@ class MarkdownPostProcessor:
         
         # Clean up empty figure placeholders
         content = re.sub(r'\[Figure:\s*\]', '[Figure]', content)
+        
+        # Convert HTML figure tags to markdown
+        # <figure>...</figure> -> [Figure: caption]
+        content = re.sub(r'<figure[^>]*>.*?<figcaption>(.*?)</figcaption>.*?</figure>', 
+                        r'[Figure: \1]', content, flags=re.DOTALL)
+        
+        return content
+    
+    def _clean_tables(self, content: str) -> str:
+        """Clean up LaTeX table artifacts."""
+        # Remove \centering command
+        content = re.sub(r'\\centering\b', '', content)
+        
+        # Remove \multirow commands (keep content)
+        content = re.sub(r'\\multirow\{[^}]+\}\{[^}]+\}\{([^}]+)\}', r'\1', content)
+        
+        # Remove \cline commands
+        content = re.sub(r'\\cline\{[^}]+\}', '', content)
+        
+        # Clean up LaTeX tabular environment (simplified - just remove the markers)
+        content = re.sub(r'\\begin\{tabular\}[^\n]*', '', content)
+        content = re.sub(r'\\end\{tabular\}', '', content)
+        content = re.sub(r'\\hline', '', content)
         
         return content
     

@@ -130,7 +130,9 @@ def download_source(
         except StopIteration:
             last_error = ArxivDownloadError(f"Paper with ID {arxiv_id} not found on arXiv")
         except arxiv.HTTPError as e:
-            if e.status_code == 429:
+            # Check if it's a rate limit error (429) by checking the error message
+            error_str = str(e)
+            if "HTTP 429" in error_str or "429" in error_str:
                 last_error = ArxivDownloadError(f"Rate limited by arXiv (HTTP 429)")
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay * (attempt + 1))  # Exponential backoff

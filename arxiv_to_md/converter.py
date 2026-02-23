@@ -16,9 +16,10 @@ class LaTeXConversionError(Exception):
 
 
 def _remove_nested_command(content: str, cmd: str) -> str:
-    """Remove LaTeX command with potentially nested braces.
+    r"""Remove LaTeX command with potentially nested braces.
     
     Handles commands that may span multiple lines and have nested braces.
+    Also handles optional arguments like \command[opt]{...}
     
     Args:
         content: LaTeX content
@@ -27,7 +28,8 @@ def _remove_nested_command(content: str, cmd: str) -> str:
     Returns:
         Content with command removed
     """
-    pattern = rf'\\{cmd}\{{'
+    # Pattern matches: \cmd{...} or \cmd[...]{...}
+    pattern = rf'\\{cmd}(?:\[[^\]]*\])?\{{'
     result = []
     i = 0
     
@@ -145,9 +147,23 @@ class LaTeXConverter:
         content = re.sub(r'\\date\{[^}]*\}', '', content)
 
         # Author information commands (handle multi-line with nested braces)
-        author_cmds = ['email', 'affiliation', 'institute', 'address', 'thanks']
+        author_cmds = ['email', 'affiliation', 'institute', 'address', 'thanks', 'author']
         for cmd in author_cmds:
             content = _remove_nested_command(content, cmd)
+
+        # Frontmatter commands (elsarticle, revtex, etc.)
+        content = re.sub(r'\\begin\{frontmatter\}', '', content)
+        content = re.sub(r'\\end\{frontmatter\}', '', content)
+        content = re.sub(r'\\begin\{abstract\}', '', content)
+        content = re.sub(r'\\end\{abstract\}', '', content)
+        content = re.sub(r'\\begin\{keyword\}', '', content)
+        content = re.sub(r'\\end\{keyword\}', '', content)
+        content = re.sub(r'\\journal\{[^}]*\}', '', content)
+        content = re.sub(r'\\appendix', '', content)
+        
+        # Additional elsarticle-specific cleanup (with optional arguments)
+        content = re.sub(r'\\affiliation(?:\[[^\]]*\])?\{[^}]*\}', '', content)
+        content = re.sub(r'\\author(?:\[[^\]]*\])?\{[^}]*\}', '', content)
 
         # Metadata and classification commands
         meta_cmds_simple = [
@@ -161,9 +177,30 @@ class LaTeXConverter:
         for pattern, repl in meta_cmds_simple:
             content = re.sub(pattern, repl, content)
 
-        # Theorem and environment definitions
-        content = re.sub(r'\\newtheorem\{[^}]+\}(?:\[[^\]]*\])?(?:\{[^}]*\})?(?:\[[^\]]*\])?', '', content)
+        # Theorem and environment definitions (handle double braces like \newtheorem{name}{{Definition}})
+        content = re.sub(r'\\newtheorem\{[^}]+\}(?:\[[^\]]*\])?(?:\{\{?[^}]*\}?\})?(?:\[[^\]]*\])?', '', content)
         content = re.sub(r'\\theoremstyle\{[^}]+\}', '', content)
+
+        # Remove conditional compilation commands (\ifdefined\NAME, not \ifdefined{NAME})
+        content = re.sub(r'\\ifdefined\\[a-zA-Z]+', '', content)
+        content = re.sub(r'\\else\b', '', content)
+        content = re.sub(r'\\fi\b', '', content)
+
+        # Remove IEEE-specific commands
+        content = re.sub(r'\\IEEEPARstart\{[^}]*\}\{[^}]*\}', '', content)
+        content = re.sub(r'\\IEEEmembership\{[^}]*\}', '', content)
+        content = re.sub(r'\\IEEEproof', '', content)
+        content = re.sub(r'\\IEEEkeywords', '', content)
+        content = re.sub(r'\\end\{IEEEkeywords\}', '', content)
+        content = re.sub(r'\\begin\{keywords\}', '', content)
+        content = re.sub(r'\\end\{keywords\}', '', content)
+        content = re.sub(r'\\thanks\{[^}]*\}', '', content)
+
+        # Page and formatting commands
+        content = re.sub(r'\\newpage\b', '', content)
+        content = re.sub(r'\\pagebreak\b', '', content)
+        content = re.sub(r'\\nopagebreak\b', '', content)
+        content = re.sub(r'\\clearpage\b', '', content)
 
         # Problematic environments
         content = re.sub(r'\\begin\{bibunit\}', '', content)
@@ -175,9 +212,20 @@ class LaTeXConverter:
             r'\\DeclarePairedDelimiterX[^\n]*\n[^}]+\}',
             r'\\DeclareRobustCommand\{[^}]+\}\[[^\]]*\]\{[^}]+\}',
             r'\\parhead\b',
+            r'\\soulregister[^\n]*',
         ]
         for pattern in cmd_defs:
             content = re.sub(pattern, '', content, flags=re.DOTALL)
+        
+        # Remove \newcommand and \renewcommand definitions (can have nested braces)
+        # These have structure: \newcommand{\name}[nargs]{definition}
+        content = self._remove_newcommand_definitions(content, 'newcommand')
+        content = self._remove_newcommand_definitions(content, 'renewcommand')
+        content = self._remove_newcommand_definitions(content, 'providecommand')
+        
+        # Remove \DeclareMathOperator
+        content = self._remove_newcommand_definitions(content, 'DeclareMathOperator')
+        content = self._remove_newcommand_definitions(content, 'DeclareMathOperator*')
 
         # Citation formatting commands (extract content only)
         cite_formats = [
@@ -192,15 +240,78 @@ class LaTeXConverter:
         graphics_cmds = [
             'usetikzlibrary', 'tikzset', 'pgfplotsset',
             'definecolor', 'color', 'colorlet',
-            'keyword', 'keywords', 'pacs'
+            'keyword', 'keywords', 'pacs', 'pagecolor',
+            'textcolor', 'colorbox', 'fcolorbox'
         ]
         for cmd in graphics_cmds:
             content = _remove_nested_command(content, cmd)
+        
+        # Remove color macro definitions like \red, \blue, etc.
+        content = re.sub(r'\\[a-zA-Z]+color\{[^}]*\}', '', content)
+        
+        # Remove standalone color macros (often defined via \definecolor or \colorlet)
+        # These typically appear as \red, \blue, etc. followed by content in braces
+        color_macros = ['red', 'blue', 'green', 'black', 'white', 'yellow', 
+                       'cyan', 'magenta', 'brown', 'gray', 'grey', 'orange',
+                       'violet', 'purple', 'pink', 'teal', 'lime', 'olive',
+                       'magen', 'hlred', 'hlmag', 'hlblue', 'hlgreen', 'hlbrown']
+        for color in color_macros:
+            # Remove \color{content} or just \color when it appears as a macro
+            content = re.sub(rf'\\{color}(?:\{{[^}}]*\}})?', '', content)
 
         # Remove raw_tex attributes from pandoc output
         content = re.sub(r'`[^`]*`\{=latex\}', '', content)
 
         return content
+    
+    def _remove_newcommand_definitions(self, content: str, cmd_type: str) -> str:
+        """Remove \newcommand, \renewcommand, etc. definitions.
+        
+        These have a special structure: \\cmd{\\name}[nargs]{definition}
+        where nargs is optional and there can be multiple definition blocks.
+        """
+        # Pattern matches: \cmd{\name} or \cmd{\name}[nargs]
+        pattern = rf'\\{re.escape(cmd_type)}(?:\*)?\{{[^}}]+\}}(?:\[[^\]]*\])?'
+        
+        result = []
+        i = 0
+        
+        while i < len(content):
+            match = re.search(pattern, content[i:])
+            if not match:
+                result.append(content[i:])
+                break
+            
+            # Append content before command
+            result.append(content[i:i + match.start()])
+            
+            # Find all the definition blocks (braced content)
+            start = i + match.end()
+            brace_count = 0
+            j = start
+            in_brace = False
+            
+            while j < len(content):
+                if content[j] == '{':
+                    brace_count += 1
+                    in_brace = True
+                elif content[j] == '}':
+                    brace_count -= 1
+                    if brace_count == 0 and in_brace:
+                        # Finished one definition block
+                        j += 1
+                        # Check if there's another brace immediately after
+                        if j < len(content) and content[j] == '{':
+                            in_brace = False
+                            continue
+                        else:
+                            break
+                j += 1
+            
+            # Move past the command and its definition
+            i = j
+        
+        return ''.join(result)
     
     def _postprocess_citations(self, content: str) -> str:
         """Post-process citation keys in markdown output.

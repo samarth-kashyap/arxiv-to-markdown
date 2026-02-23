@@ -4,10 +4,10 @@ This is a test paper J. Smith & Lee., 2020. We build on previous work by A. Vasw
 
 ## Background
 
-The key equation is: $$\begin{equation}
+The key equation is: $$
 
 \text{Attention}(Q, K, V) = \text{softmax}(\frac{QK^T}{\sqrt{d_k}})V
-\end{equation}$$
+$$
 
 As shown in Equation, this is important.
 

@@ -359,7 +359,8 @@ class BibliographyHandler:
                         doi=paper.doi
                     )
                 except arxiv_lib.HTTPError as e:
-                    if e.status_code == 429 and attempt < max_retries - 1:
+                    error_str = str(e)
+                    if "HTTP 429" in error_str and attempt < max_retries - 1:
                         time.sleep(retry_delay * (attempt + 1))
                         continue
                     raise
@@ -430,6 +431,8 @@ class BibliographyHandler:
                 # Remove \bibinfo{title}{...} and similar commands
                 title = re.sub(r'\\bibinfo\{title\}\{([^}]+)\}', r'\1', title)
                 title = re.sub(r'\\[a-zA-Z]+\{([^}]+)\}', r'\1', title)
+                # Remove \newblock command
+                title = re.sub(r'\\newblock\s*', ' ', title)
                 title = title.replace('~', ' ').strip()
                 if link:
                     lines.append(f"- {author_year}. *{title}*. [{key}]({link})")
