@@ -83,6 +83,9 @@ class MarkdownPostProcessor:
         # Remove raw_tex attributes from pandoc
         content = re.sub(r'`[^`]*`\{=latex\}', '', content)
         
+        # Remove RGB color definitions
+        content = re.sub(r'\bRGB\d+,\d+,\d+\b', '', content)
+        
         # Remove empty lines at the start of the document that might contain LaTeX artifacts
         lines = content.split('\n')
         start_idx = 0
@@ -118,6 +121,11 @@ class MarkdownPostProcessor:
         content = re.sub(r'\\end\{keyword\}', '', content)
         content = re.sub(r'\\appendix', '', content)
         
+        # Remove \addtoreset and similar counter commands
+        content = re.sub(r'\\addtoreset\{[^}]+\}\{[^}]+\}', '', content)
+        content = re.sub(r'\\addtoreset\w*', '', content)
+        content = re.sub(r'\\@addtoreset\{[^}]+\}\{[^}]+\}', '', content)
+        
         # Remove lines that are just bracketed theorem names at the start
         lines = content.split('\n')
         cleaned_lines = []
@@ -137,6 +145,10 @@ class MarkdownPostProcessor:
             cleaned_lines.append(line)
         
         content = '\n'.join(cleaned_lines)
+        
+        # Clean up theorem/proposition environment markers
+        content = re.sub(r'\\begin\{(theorem|proposition|lemma|corollary|definition|example|remark|proof)\}', '', content)
+        content = re.sub(r'\\end\{(theorem|proposition|lemma|corollary|definition|example|remark|proof)\}', '', content)
         
         return content
     

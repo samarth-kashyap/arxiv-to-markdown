@@ -16,10 +16,10 @@ class LaTeXConversionError(Exception):
 
 
 def _remove_nested_command(content: str, cmd: str) -> str:
-    r"""Remove LaTeX command with potentially nested braces.
+    """Remove LaTeX command with potentially nested braces.
     
     Handles commands that may span multiple lines and have nested braces.
-    Also handles optional arguments like \command[opt]{...}
+    Also handles optional arguments like \\command[opt]{...}
     
     Args:
         content: LaTeX content
@@ -28,7 +28,6 @@ def _remove_nested_command(content: str, cmd: str) -> str:
     Returns:
         Content with command removed
     """
-    # Pattern matches: \cmd{...} or \cmd[...]{...}
     pattern = rf'\\{cmd}(?:\[[^\]]*\])?\{{'
     result = []
     i = 0
@@ -39,10 +38,8 @@ def _remove_nested_command(content: str, cmd: str) -> str:
             result.append(content[i:])
             break
             
-        # Append content before command
         result.append(content[i:i + match.start()])
         
-        # Find matching closing brace
         start = i + match.end()
         brace_count = 1
         j = start
@@ -54,7 +51,6 @@ def _remove_nested_command(content: str, cmd: str) -> str:
                 brace_count -= 1
             j += 1
         
-        # Move past the command
         i = j
     
     return ''.join(result)
@@ -66,11 +62,7 @@ class LaTeXConverter:
     def __init__(self, bib_handler: Optional[BibliographyHandler] = None):
         self.bib_handler = bib_handler
     
-    def convert(
-        self,
-        tex_content: str,
-        filter_path: Optional[Path] = None
-    ) -> str:
+    def convert(self, tex_content: str, filter_path: Optional[Path] = None) -> str:
         """Convert LaTeX content to Markdown.
         
         Args:
@@ -173,6 +165,9 @@ class LaTeXConverter:
             (r'\\hyphenation\{[^}]+\}', ''),
             (r'\\subjclass(?:\[[^\]]*\])?\{[^}]*\}', ''),
             (r'\\setcounter\{[^}]+\}\{[^}]+\}', ''),
+            (r'\\addtoreset\{[^}]+\}\{[^}]+\}', ''),
+            (r'\\addtoreset\w*', ''),
+            (r'\\@addtoreset\{[^}]+\}\{[^}]+\}', ''),
         ]
         for pattern, repl in meta_cmds_simple:
             content = re.sub(pattern, repl, content)
