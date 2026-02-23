@@ -413,9 +413,9 @@ class LaTeXConverter:
         'keyword', 'keywords', 'pacs', 'pagecolor',
     ]
     
-    def __init__(self, bib_handler: Optional[BibliographyHandler] = None, equation_numbers: Optional[dict] = None):
+    def __init__(self, bib_handler: Optional[BibliographyHandler] = None, labels: Optional[dict] = None):
         self.bib_handler = bib_handler
-        self.equation_numbers = equation_numbers or {}
+        self.labels = labels or {}
         self.command_processor = LaTeXCommandProcessor()
     
     def convert(self, tex_content: str, filter_path: Optional[Path] = None) -> str:
@@ -550,73 +550,64 @@ class LaTeXConverter:
     
     def _preprocess_references(self, content: str) -> str:
         r"""Pre-process reference commands (\ref, \eqref, etc.).
-        
-        For equations: Converts \label{label} to equation number tags and 
-        \ref{label}/\eqref{label} to markdown links with equation numbers.
+
+        For equations: Converts \label{label} to HTML anchor and
+        \ref{label}/\eqref{label} to markdown links using the raw label.
         For other references: Converts to just the reference type name.
         """
-        if not self.equation_numbers:
-            # No equation numbers to process, just remove refs and labels
-            content = re.sub(r'\\(?:eq)?ref\{[^}]+\}', '', content)
-            content = re.sub(r'\\label\{[^}]+\}', '', content)
-            return content
-        
         # Build a set of equation labels for fast lookup
-        eq_labels = set(self.equation_numbers.keys())
-        
-        # Handle equation environments first - add equation numbers and anchors
+        eq_labels = {label for label, label_type in self.labels.items() if label_type == 'eq'}
+
+        # Handle equation environments first - add HTML anchors
         # Match equation environments with optional labels inside
         eq_env_pattern = r'\\begin\{(equation|align|align\*|gather|gather\*)\}(.*?)\\end\{\1\}'
-        
+
         def process_equation_env(match):
             env_type = match.group(1)
             env_content = match.group(2)
-            
+
             # Check for label in the equation content
             label_match = re.search(r'\\label\{([^}]+)\}', env_content)
             if label_match:
                 label = label_match.group(1)
                 if label in eq_labels:
-                    eq_num = self.equation_numbers[label]
-                    # Remove the label from inside the equation and add tag outside
+                    # Remove the label from inside the equation and add anchor outside
                     env_content_clean = re.sub(r'\\label\{[^}]+\}', '', env_content)
-                    # Return equation with number tag and HTML anchor
-                    return f'\\begin{{{env_type}}}{env_content_clean}\\tag{{{eq_num}}}<a name="{label}"></a>\\end{{{env_type}}}'
-            
+                    # Return equation with HTML anchor
+                    return f'\\begin{{{env_type}}}{env_content_clean}<a name="{label}"></a>\\end{{{env_type}}}'
+
             # No label found, return as-is
             return match.group(0)
-        
+
         content = re.sub(eq_env_pattern, process_equation_env, content, flags=re.DOTALL)
-        
-        # Handle equation references - match any \ref{label} or \eqref{label} 
-        # where label is in equation_numbers
-        # Pattern captures the label and we'll check if it's an equation label
+
+        # Handle equation references - match any \ref{label} or \eqref{label}
+        # where label is an equation label
         ref_pattern = r'\\(?:eq)?ref\{([^}]+)\}'
-        
+
         def replace_eq_ref(match):
             label = match.group(1)
             if label in eq_labels:
-                eq_num = self.equation_numbers[label]
-                return f'[({eq_num})](#{label})'
-            # Not an equation label - check if it's in a context like "Eq. \ref{...}"
-            # Return empty for now, will be handled by ref_context_pattern
+                # Use raw label in the link
+                return f'[({label})](#{label})'
+            # Not an equation label - return as-is for now, will be handled by ref_context_pattern
             return match.group(0)
-        
+
         content = re.sub(ref_pattern, replace_eq_ref, content)
-        
+
         # Match patterns like "Equation \ref{...}", "Fig. \ref{...}", etc.
         # Need to capture the label to check if it's an equation
         ref_context_pattern = r'(Equation|Eq\.?|Fig\.?|Figure|Table|Tab\.?|Section|Sec\.)\s*\\(?:eq)?ref\{([^}]+)\}'
-        
+
         def replace_ref_context(match):
             ref_type = match.group(1)
             label = match.group(2)
-            
+
             # Check if this is an equation reference
             if label in eq_labels:
-                eq_num = self.equation_numbers[label]
-                return f'Equation [({eq_num})](#{label})'
-            
+                # Use raw label in the link
+                return f'Equation [({label})](#{label})'
+
             # Normalize abbreviations for non-equation refs
             ref_lower = ref_type.lower()
             if ref_lower in ['eq.', 'eq']:
@@ -628,13 +619,13 @@ class LaTeXConverter:
             elif ref_lower in ['sec.', 'sec']:
                 return 'Section'
             return ref_type
-        
+
         content = re.sub(ref_context_pattern, replace_ref_context, content, flags=re.IGNORECASE)
-        
+
         # Remove any remaining bare \ref{...} or \eqref{...}
         content = re.sub(r'\\(?:eq)?ref\{[^}]+\}', '', content)
-        
+
         # Remove remaining \label commands
         content = re.sub(r'\\label\{[^}]+\}', '', content)
-        
+
         return content

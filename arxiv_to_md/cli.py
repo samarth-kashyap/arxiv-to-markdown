@@ -148,7 +148,7 @@ def main(arxiv_input, output_dir, keep_source, verbose):
         if verbose:
             click.echo("Converting to markdown...")
         
-        converter = LaTeXConverter(bib_handler, parser.equation_numbers)
+        converter = LaTeXConverter(bib_handler, parser.labels)
         
         try:
             main_md = converter.convert(main_content)

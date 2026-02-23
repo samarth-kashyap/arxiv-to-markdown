@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated output files
+[0-9][0-9][0-9][0-9].[0-9][0-9][0-9][0-9][0-9]/
+test_source/
+*.pdf
+*.png
+*.eps
