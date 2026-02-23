@@ -3,30 +3,24 @@
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Convert arXiv papers to clean, LLM-readable Markdown format.
-
-**Perfect for:** Researchers feeding papers to LLMs, creating readable documentation, or archiving papers in a searchable format.
-
----
+Convert arXiv papers from LaTeX to clean, readable Markdown optimized for LLM consumption.
 
 ## Features
 
-- **Author-Year Citations** - Converts numbered citations to `[Author et al., Year](link)` format with clickable arXiv/DOI links
-- **LaTeX Math Preservation** - Keeps `$...$` and `$$...$$` math notation for LLM compatibility
-- **Separate Appendix Files** - Automatically splits main paper and appendix into separate files
-- **Token-Efficient Output** - Simplifies notation (`boldsymbol` → `textbf`, reduces whitespace)
-- **Bibliography Generation** - Creates formatted reference list with links
-- **Figure Placeholders** - Marks figure locations with captions for LLM context
-- **Reference Resolution** - Converts `ref`, `ref` to readable text
-
----
+- **Equation Cross-References** - Converts `\ref{eq:label}` to `[(eq:label)](#eq:label)` with clickable anchors
+- **Author-Year Citations** - Transforms `\cite{key}` to `[Author et al., Year](link)` format with arXiv/DOI links
+- **LaTeX Math Preservation** - Keeps `$...$` and `$$...$$` notation for compatibility with math renderers
+- **Bibliography Generation** - Creates formatted reference sections from `.bbl` or `.bib` files
+- **Appendix Separation** - Automatically splits main content and appendix into separate files
+- **Figure Placeholders** - Marks figure locations with captions for context
+- **Clean Output** - Removes LaTeX artifacts, simplifies notation, optimizes for token efficiency
 
 ## Installation
 
 ### Prerequisites
 
 - Python 3.9+
-- Pandoc 3.0+ (external dependency)
+- Pandoc 3.0+ (system package)
 
 ```bash
 # macOS
@@ -35,19 +29,22 @@ brew install pandoc
 # Ubuntu/Debian
 sudo apt-get install pandoc
 
-# Other: https://pandoc.org/installing.html
+# Other systems: https://pandoc.org/installing.html
 ```
 
 ### Install
 
 ```bash
-# Clone and install
+# Clone the repository
 git clone <repository-url>
 cd arxiv-to-markdown
-uv pip install -e .
-```
 
----
+# Install with uv (recommended)
+uv pip install -e .
+
+# Or with pip
+pip install -e .
+```
 
 ## Usage
 
@@ -59,85 +56,139 @@ arxiv-to-md 2401.12345
 arxiv-to-md https://arxiv.org/abs/2401.12345
 
 # Specify output directory
-arxiv-to-md 2401.12345 -o ./my-papers
+arxiv-to-md 2401.12345 -o ./papers
 
-# Keep source files (for debugging)
+# Keep source files for debugging
 arxiv-to-md 2401.12345 --keep-source -v
 ```
 
----
+## Output
 
-## Output Format
-
-For paper ID `2401.12345`, generates:
+For paper ID `2401.12345`, creates:
 
 ```
 2401.12345/
 ├── 2401.12345_main.md       # Main paper content
-└── 2401.12345_appendix.md   # Appendix sections (if present)
+└── 2401.12345_appendix.md   # Appendix (if present)
 ```
 
-### Citation Example
+## Examples
 
-**Input:**
+### Equation References
+
+**Input (LaTeX):**
+```latex
+\begin{equation}
+E = mc^2
+\label{eq:energy}
+\end{equation}
+
+As shown in Eq.~\ref{eq:energy}...
+```
+
+**Output (Markdown):**
+```markdown
+$$
+E = mc^2
+$$ <a name="eq:energy"></a>
+
+As shown in Equation [(eq:energy)](#eq:energy)...
+```
+
+### Citations
+
+**Input (LaTeX):**
 ```latex
 \cite{vaswani2017attention} introduced Transformers.
 ```
 
-**Output:**
+**Output (Markdown):**
 ```markdown
 [Vaswani et al., 2017](https://arxiv.org/abs/1706.03762) introduced Transformers.
 ```
 
----
-
 ## Architecture
 
 ```
-arxiv_id
+arXiv ID
   ↓
-downloader.py    →  Download & extract source
+downloader.py     →  Download & extract source
   ↓
-parser.py        →  Parse LaTeX, expand \input, split document
+parser.py         →  Parse LaTeX, expand \input{}, identify equation labels
   ↓
 bibtex_handler.py →  Parse bibliography, resolve citations
   ↓
-converter.py     →  Convert via Pandoc
+converter.py      →  Convert via Pandoc, add equation anchors & refs
   ↓
-postprocessor.py →  Clean up markdown
+postprocessor.py  →  Clean up markdown, simplify math
   ↓
-Output files     →  {arxiv_id}_main.md + {arxiv_id}_appendix.md
+Output files      →  {arxiv_id}_main.md + {arxiv_id}_appendix.md
 ```
-
----
 
 ## Development
 
 ```bash
 # Run tests
-uv run pytest tests/test_comprehensive.py -v
+uv run pytest tests/ -v
 
 # Install dev dependencies
 uv sync
 ```
 
-See [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md) for architecture details and future improvements.
+### Project Structure
 
----
+```
+arxiv-to-markdown/
+├── arxiv_to_md/
+│   ├── __init__.py
+│   ├── cli.py              # Command-line interface
+│   ├── converter.py        # LaTeX → Markdown conversion
+│   ├── postprocessor.py    # Markdown cleanup
+│   ├── downloader.py       # arXiv source download
+│   ├── parser.py           # LaTeX structure parsing
+│   └── bibtex_handler.py   # Bibliography processing
+├── tests/
+│   └── test_comprehensive.py
+├── pyproject.toml
+└── README.md
+```
 
-## Known Limitations
+## How It Works
 
-1. Some citations may not have links if arXiv ID/DOI not in source
-2. Complex LaTeX macros may not convert perfectly
-3. Figure images not included (just placeholders)
-4. Some author names may parse incorrectly from .bbl files
+### Equation Labeling
 
----
+Unlike other converters that guess equation numbers (which is fragile and often wrong), this tool uses the **actual LaTeX labels** for cross-references:
+
+1. **Parser** identifies which `\label{}` commands appear inside equation environments
+2. **Converter** replaces `\label{foo}` with `<a name="foo"></a>`
+3. **Converter** replaces `\ref{foo}` or `\eqref{foo}` with `[(foo)](#foo)`
+
+This approach is:
+- ✅ 100% accurate (uses author's exact labels)
+- ✅ Works with any naming convention (`eq:foo`, `opt_problem`, etc.)
+- ✅ Handles unnumbered equations, subequations, manual tags
+- ✅ No LaTeX compilation required
+
+### Citation Resolution
+
+1. Parse `.bbl` file (if available) to extract author/year/title/URLs
+2. Look up missing citations via arXiv API
+3. Format as `[Author et al., Year](link)` with arXiv or DOI links
+
+## Limitations
+
+- Figure images are not included (only placeholders with captions)
+- Complex LaTeX macros may not convert perfectly
+- Some table formatting may be simplified
+- Citations without arXiv ID or DOI in source won't have links
 
 ## License
 
 MIT License
 
----
+## Acknowledgments
 
-**Version:** 0.1.0 | **Last Updated:** 2024-02-19
+Built with:
+- [Pandoc](https://pandoc.org/) for LaTeX→Markdown conversion
+- [arxiv](https://pypi.org/project/arxiv/) library for arXiv API access
+- [pypandoc](https://pypi.org/project/pypandoc/) for Pandoc Python bindings
